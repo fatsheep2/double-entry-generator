@@ -1022,8 +1022,15 @@ ccb:
 
 `ccb` 是中国建设银行相关的配置。它提供基于规则的匹配。可以指定：
 - `peer`（对方户名）的完全/包含匹配。
+- `item`（交易地点）的完全/包含匹配。
 - `type`（收/支）的完全/包含匹配。
 - `txType`（摘要）的完全/包含匹配。
+- `time`（交易时间）的区间匹配。
+  > 交易时间可写为以下两种形式：
+  > - `11:00-13:00`
+  > - `11:00:00-13:00:00`
+  > 24 小时制，起始时间和终止之间之间使用 `-` 分隔。
+- `minPrice`（最小金额）和 `maxPrice`（最大金额）的区间匹配。
 
 在单条规则中可以使用分隔符 `sep` 填写多个关键字，在同一对象中，每个关键字之间是或的关系。
 
@@ -1446,6 +1453,28 @@ double-entry-generator translate \
   ./example/icbc/example-icbc-credit-records.csv
 ```
 
+#### 中国建设银行
+> [!TIP]
+> 
+> 支持建设银行账单（CSV、XLS、XLSX格式），字段自动识别。
+
+```bash
+double-entry-generator translate \
+  --config ./example/ccb/config.yaml \
+  --provider ccb \
+  --output ./example/ccb/example-ccb-output.beancount \
+  ./example/ccb/交易明细_xxxx_2025xxxx_2025xxxx.xls
+```
+
+windows的powershell下运行:
+
+```sh
+double-entry-generator translate \
+  --config ./example/ccb/config.yaml \
+  --provider ccb \
+  --output ./example/ccb/example-ccb-output.beancount \
+  ./example/ccb/交易明细_xxxx_2025xxxx_2025xxxx.xls
+```
 
 #### Toronto-Dominion Bank
 
