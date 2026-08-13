@@ -88,9 +88,24 @@ Documentation contributions include:
 
 Documentation files are located in the `docs/` directory, using Markdown format.
 
-### 🔧 Adding a New Provider
+### 🔧 Adding Support for a New Bill Format
 
-If you want to add support for a new data source:
+To add support for a new bill format, **prefer the [Generic Template Provider](../providers/template.md)** over adding a new Go package to the DEG codebase. The traditional Go provider path is still available, but should only be used when the template engine genuinely cannot express the format (see below).
+
+#### Option 1: Generic Template (recommended)
+
+Most bill formats (CSV/XLSX/XLS with fixed fields, and rules expressible with `when`/`actions`) can be onboarded with YAML alone, no Go code required:
+
+1. Follow the [template file](../providers/template.md#模板文件) and [rule file](../providers/template.md#规则文件) syntax to write a template file (how the bill is read) and template rules (what the bill means — spend/income direction, refunds, fees, etc.).
+2. Validate it against your own bill: `double-entry-generator import ./your-template.yaml bill.csv -o output.bean`.
+3. Submit the template to the [deb-sig/deg-provider-template](https://github.com/deb-sig/deg-provider-template) repository — a separate repo from this one — instead of opening a PR here.
+4. Once the template is merged, users can import it directly with `double-entry-generator import your-provider bill.csv`, with no new DEG release required.
+
+This path doesn't require understanding DEG internals (IR, analyser, compiler), and review only needs to check the template and rules themselves.
+
+#### Option 2: Traditional Go Provider (only when the template engine can't express the format)
+
+Add a new Go provider in this repository only when the bill format cannot be expressed by the template engine — for example binary/encrypted file formats, calls to external APIs, or stateful multi-row merging logic:
 
 1. **Create Provider directory**
    ```bash
@@ -108,6 +123,8 @@ If you want to add support for a new data source:
 4. **Update documentation**
    - Add documentation under `docs/providers/`
    - Update README and navigation
+
+When opening this kind of PR, please briefly explain in the description why the template engine can't handle the format, to make review easier.
 
 ## Commit Convention
 

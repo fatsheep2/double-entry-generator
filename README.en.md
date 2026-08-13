@@ -163,7 +163,7 @@ For more examples, please check the [Examples Documentation](https://deb-sig.git
 ```
 
 The architecture supports extension:
-- Add new bill formats: Implement new [provider](pkg/provider)
+- Add new bill formats: prefer writing a [generic template](https://deb-sig.github.io/double-entry-generator/providers/template.html) (submitted to the [deg-provider-template](https://github.com/deb-sig/deg-provider-template) repository), and only implement a new [provider](pkg/provider) when the template engine can't express the format
 - Add new accounting languages: Implement new [compiler](pkg/compiler)
 
 ## 📚 Documentation

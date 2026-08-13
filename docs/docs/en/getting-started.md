@@ -169,7 +169,8 @@ Match fields (`peer`, `category`, `type`, `item`, `method`, `time`, `minPrice`, 
 A: You can:
 1. Check if there are similar providers you can reference
 2. Submit an issue on GitHub requesting support
-3. Contribute code to add a new provider
+3. Most formats can be onboarded directly with a [generic template](providers/template.md), submitted to the [deg-provider-template](https://github.com/deb-sig/deg-provider-template) repository, with no changes needed in this repository
+4. Only contribute a new Go provider (see [Contributing Guide](contributing.md#adding-support-for-a-new-bill-format)) when the template engine genuinely cannot express the format
 
 ### Q: How to customize account mapping?
 

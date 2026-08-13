@@ -167,7 +167,7 @@ double-entry-generator translate \
 ```
 
 架构支持扩展：
-- 添加新的账单格式：实现新的 [provider](pkg/provider)
+- 添加新的账单格式：优先编写[通用模板](https://deb-sig.github.io/double-entry-generator/providers/template.html)（提交到 [deg-provider-template](https://github.com/deb-sig/deg-provider-template) 仓库），仅当模板引擎无法表达该格式时才实现新的 [provider](pkg/provider)
 - 添加新的记账语言：实现新的 [compiler](pkg/compiler)
 
 ## 📚 文档

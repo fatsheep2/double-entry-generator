@@ -211,7 +211,8 @@ option "operating_currency" "CNY"
 A: 可以：
 1. 查看是否有类似的 provider 可以参考
 2. 在 GitHub 上提交 issue 请求支持
-3. 贡献代码添加新的 provider
+3. 大多数格式可以直接编写[通用模板](providers/template.md)，提交到 [deg-provider-template](https://github.com/deb-sig/deg-provider-template) 仓库，无需修改本仓库代码
+4. 仅当模板引擎无法表达该格式时，才贡献代码添加新的 Go provider（见[贡献指南](contributing.md#添加新的账单格式支持)）
 
 ### Q: 如何自定义账户映射？
 

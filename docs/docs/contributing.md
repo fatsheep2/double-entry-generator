@@ -88,9 +88,24 @@ make test
 
 文档文件位于 `docs/` 目录下，使用 Markdown 格式。
 
-### 🔧 添加新的 Provider
+### 🔧 添加新的账单格式支持
 
-如果您想添加新的数据源支持：
+添加一种新的账单格式，**优先使用[通用模板 Provider](providers/template.md)**，而不是在 DEG 本体里新增 Go 包。传统 Go provider 方式仍然可用，但只建议在模板引擎确实无法表达账单格式时使用（详见下文）。
+
+#### 方式一：通用模板（推荐）
+
+大多数账单格式（CSV/XLSX/XLS，字段固定，规则可用 `when`/`actions` 表达）都可以只写 YAML 就完成接入：
+
+1. 参考[模板文件](providers/template.md#模板文件)和[规则文件](providers/template.md#规则文件)语法，编写模板文件（描述账单如何被读取）和模板规则（描述账单业务含义，如收支方向、退款、手续费等）。
+2. 用你自己的账单验证：`double-entry-generator import ./your-template.yaml bill.csv -o output.bean`。
+3. 将模板提交到 [deb-sig/deg-provider-template](https://github.com/deb-sig/deg-provider-template) 仓库（该仓库独立于本仓库维护），而不是本仓库。
+4. 模板合入后，用户即可通过 `double-entry-generator import your-provider bill.csv` 直接使用，无需 DEG 发布新版本。
+
+这种方式不需要理解 DEG 内部结构（IR、analyser、compiler），review 也只需要检查模板和规则本身。
+
+#### 方式二：传统 Go Provider（仅在模板引擎无法表达时使用）
+
+当账单格式无法用模板引擎表达时（例如二进制/加密文件格式、需要调用外部 API、需要有状态的多行合并逻辑等），才在本仓库新增 Go provider：
 
 1. **创建 Provider 目录**
    ```bash
@@ -108,6 +123,8 @@ make test
 4. **更新文档**
    - 在 `docs/providers/` 下添加文档
    - 更新 README 和导航
+
+提交这类 PR 时，请在描述中简单说明为什么模板引擎无法满足需求，方便维护者 review。
 
 ## 提交规范
 
