@@ -1,0 +1,4 @@
+{
+  "name": "double-entry-generator",
+  "install": "bash .cursor/install.sh"
+}
