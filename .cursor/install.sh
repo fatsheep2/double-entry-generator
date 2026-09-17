@@ -14,6 +14,10 @@ echo "==> Building the double-entry-generator CLI"
 make build
 
 echo "==> Installing Go dev tools (ginkgo, goimports, golangci-lint)"
+# Install into ~/.local/bin, which is on the default login-shell PATH, so the
+# tools are reachable as bare commands (GOPATH/bin is not always on PATH).
+export GOBIN="$HOME/.local/bin"
+mkdir -p "$GOBIN"
 # ginkgo is resolved from go.mod so it matches the pinned test framework version.
 go install github.com/onsi/ginkgo/v2/ginkgo
 go install golang.org/x/tools/cmd/goimports@latest
