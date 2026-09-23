@@ -218,7 +218,8 @@ func scanMethodTail(expr string, i int) int {
 }
 
 func matchOperator(s string) (string, bool) {
-	for _, op := range []string{"&&", "||", "==", "!=", ">=", "<=", "!~", "~", ">", "<"} {
+	// Longer operators first so "=~" / "^=" / "$=" are not split.
+	for _, op := range []string{"&&", "||", "==", "!=", ">=", "<=", "!~", "=~", "^=", "$=", "~", ">", "<"} {
 		if strings.HasPrefix(s, op) {
 			return op, true
 		}
@@ -363,6 +364,17 @@ func compareValues(left, op, right string) (bool, error) {
 		return strings.Contains(left, right), nil
 	case "!~":
 		return !strings.Contains(left, right), nil
+	case "^=":
+		return strings.HasPrefix(left, right), nil
+	case "$=":
+		return strings.HasSuffix(left, right), nil
+	case "=~":
+		re, err := regexp.Compile(right)
+		if err != nil {
+			return false, fmt.Errorf("invalid regex %q: %w", right, err)
+		}
+		loc := re.FindStringIndex(left)
+		return loc != nil && loc[0] == 0 && loc[1] == len(left), nil
 	case ">", ">=", "<", "<=":
 		if l, lOK := parseComparableNumber(left); lOK {
 			if r, rOK := parseComparableNumber(right); rOK {

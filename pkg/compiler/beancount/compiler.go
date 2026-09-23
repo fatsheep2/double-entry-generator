@@ -242,6 +242,8 @@ func (b *BeanCount) writeBill(file io.Writer, index int) error {
 				Note:     o.Note,
 				Metadata: o.Metadata,
 				Tags:     o.Tags,
+				Flag:     o.Flag,
+				Links:    o.Links,
 				Postings: postings,
 			})
 			break

@@ -52,6 +52,8 @@ type Order struct {
 	PlusAccount     string
 	Metadata        map[string]string
 	Tags            []string
+	Flag            string
+	Links           []string
 	Postings        []Posting
 }
 

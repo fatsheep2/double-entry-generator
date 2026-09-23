@@ -32,6 +32,9 @@ type Row struct {
 }
 
 func ImportFile(profile *Profile, filename string) (*ir.IR, error) {
+	if err := profile.ValidateCapabilities(); err != nil {
+		return nil, err
+	}
 	rows, err := ParseFile(profile, filename)
 	if err != nil {
 		return nil, err
@@ -432,6 +435,9 @@ func rowToV2Order(profile *Profile, row Row) (ir.Order, bool, error) {
 	ignore := false
 	mergedV2Actions := Actions{}
 	for _, rule := range profile.Rules() {
+		if !ruleInScope(rule, profile.ID) {
+			continue
+		}
 		matches, err := ruleMatches(rule, row, order)
 		if err != nil {
 			return ir.Order{}, false, err
@@ -487,6 +493,9 @@ func rowToOrder(profile *Profile, row Row) (ir.Order, bool, error) {
 
 	ignore := false
 	for _, rule := range profile.Rules() {
+		if !ruleInScope(rule, profile.ID) {
+			continue
+		}
 		matches, err := ruleMatches(rule, row, order)
 		if err != nil {
 			return ir.Order{}, false, err
@@ -513,6 +522,13 @@ func ruleMatches(rule Rule, row Row, order ir.Order) (bool, error) {
 		return false, fmt.Errorf("rule when %q failed: %w", rule.When, err)
 	}
 	return ok, nil
+}
+
+func ruleInScope(rule Rule, profileID string) bool {
+	if rule.TemplateID == "" {
+		return true
+	}
+	return profileID != "" && rule.TemplateID == profileID
 }
 
 func applyActions(order *ir.Order, row Row, actions Actions, ignore *bool, v2 bool) error {
@@ -563,14 +579,25 @@ func applyActions(order *ir.Order, row Row, actions Actions, ignore *bool, v2 bo
 	}
 	if v2 {
 		for _, line := range actions.Postings {
-			rendered := strings.TrimSpace(renderRuleText(line, row, *order))
+			rendered := strings.TrimSpace(resolveActionValue(line, row, *order))
+			if rendered == "" {
+				continue
+			}
+			// Posting lines may still contain arithmetic outside quoted literals.
+			if _, isLit := parseActionLiteral(line); !isLit {
+				rendered = strings.TrimSpace(evalSimpleArithmetic(rendered))
+			}
 			if rendered != "" {
 				order.Postings = append(order.Postings, ir.Posting{Line: rendered})
 			}
 		}
 	}
 	if actions.Tag != "" {
-		order.Tags = append(order.Tags, splitList(actions.Tag)...)
+		if v2 {
+			order.Tags = append(order.Tags, splitList(resolveActionValue(actions.Tag, row, *order))...)
+		} else {
+			order.Tags = append(order.Tags, splitList(actions.Tag)...)
+		}
 	}
 	order.Tags = append(order.Tags, actions.Tags...)
 	if actions.Metadata != nil {
@@ -579,7 +606,7 @@ func applyActions(order *ir.Order, row Row, actions Actions, ignore *bool, v2 bo
 		}
 		for key, value := range actions.Metadata {
 			if v2 {
-				order.Metadata[key] = renderRuleText(value, row, *order)
+				order.Metadata[key] = resolveActionValue(value, row, *order)
 			} else {
 				order.Metadata[key] = resolveValue(value, row)
 			}
@@ -593,7 +620,7 @@ func applyV2ScalarActions(order *ir.Order, row Row, actions Actions, ignore *boo
 		*ignore = true
 	}
 	if actions.Date != "" {
-		if payTime, err := parseDate(renderRuleText(actions.Date, row, *order), dateFormat); err == nil {
+		if payTime, err := parseDate(resolveActionValue(actions.Date, row, *order), dateFormat); err == nil {
 			order.PayTime = payTime
 		}
 	}
@@ -607,31 +634,40 @@ func applyV2ScalarActions(order *ir.Order, row Row, actions Actions, ignore *boo
 		}
 	}
 	if actions.Type != "" {
-		order.TypeOriginal = renderRuleText(actions.Type, row, *order)
+		order.TypeOriginal = resolveActionValue(actions.Type, row, *order)
 		order.Type = inferType(order.TypeOriginal, order.Money)
 	}
 	if actions.Note != "" {
-		order.Note = renderRuleText(actions.Note, row, *order)
+		order.Note = resolveActionValue(actions.Note, row, *order)
 	}
 	if actions.Payee != "" {
-		order.Peer = renderRuleText(actions.Payee, row, *order)
+		order.Peer = resolveActionValue(actions.Payee, row, *order)
 	}
 	if actions.Narration != "" {
-		order.Item = renderRuleText(actions.Narration, row, *order)
+		order.Item = resolveActionValue(actions.Narration, row, *order)
 	}
 	if actions.Currency != "" {
-		order.Currency = renderRuleText(actions.Currency, row, *order)
+		order.Currency = resolveActionValue(actions.Currency, row, *order)
 	}
 	if actions.Tag != "" {
-		order.Tags = append(order.Tags, splitList(actions.Tag)...)
+		order.Tags = append(order.Tags, splitList(resolveActionValue(actions.Tag, row, *order))...)
 	}
 	order.Tags = append(order.Tags, actions.Tags...)
+	if actions.Flag != "" {
+		order.Flag = strings.TrimSpace(resolveActionValue(actions.Flag, row, *order))
+	}
+	if actions.Link != "" {
+		link := strings.TrimSpace(resolveActionValue(actions.Link, row, *order))
+		if link != "" {
+			order.Links = append(order.Links, link)
+		}
+	}
 	if actions.Metadata != nil {
 		if order.Metadata == nil {
 			order.Metadata = map[string]string{}
 		}
 		for key, value := range actions.Metadata {
-			rendered := renderRuleText(value, row, *order)
+			rendered := resolveActionValue(value, row, *order)
 			if rendered == "" {
 				delete(order.Metadata, key)
 				continue
@@ -715,7 +751,7 @@ func rowWithVars(row Row, vars map[string]string, order ir.Order) Row {
 }
 
 func renderTransferPosting(side TransferSide, defaultAmount, defaultCurrency, direction string, row Row, order ir.Order) (string, bool) {
-	account := strings.TrimSpace(renderRuleText(side.Account, row, order))
+	account := strings.TrimSpace(resolveActionValue(side.Account, row, order))
 	if account == "" {
 		return "", false
 	}
@@ -727,7 +763,7 @@ func renderTransferPosting(side TransferSide, defaultAmount, defaultCurrency, di
 	amount = forceAmountDirection(amount, direction)
 	parts := []string{account, renderPostingText(amount, row, order)}
 	if currency != "" {
-		parts = append(parts, renderRuleText(currency, row, order))
+		parts = append(parts, resolveActionValue(currency, row, order))
 	}
 	return strings.Join(nonEmptyStrings(parts), " "), true
 }
@@ -973,7 +1009,67 @@ func splitList(value string) []string {
 	return out
 }
 
-var columnExprPattern = regexp.MustCompile(`(?:\[([^\]]+)\]|<([^>]+)>)((?:\.(?:extract|format)\((?:r)?"[^"]*"\)|\.(?:extract|format)\((?:r)?'[^']*'\)|\.[A-Za-z0-9_]+|\.[+\-!])*)`)
+var columnExprPattern = regexp.MustCompile(`(?:\[([^\]]+)\]|<([^>]+)>)((?:\.(?:extract|format)\((?:r)?"[^"]*"\)|\.(?:extract|format)\((?:r)?'[^']*'\)|\.replace\((?:r)?"[^"]*",(?:r)?"[^"]*"\)|\.replace\((?:r)?'[^']*',(?:r)?'[^']*'\)|\.[A-Za-z0-9_]+|\.[+\-!])*)`)
+
+// resolveActionValue implements the Mirato↔DEG action literal/ref protocol:
+//   - fully quoted "..." / '...' => string literal (escapes: \\ \" \' \n \r \t)
+//   - otherwise interpolate <col> / [col] refs (and methods) via renderRuleText
+// Fixed text such as "<金额>", "payee", or "1+2" must be quoted so it is not
+// treated as a column ref or arithmetic expression.
+func resolveActionValue(value string, row Row, order ir.Order) string {
+	if lit, ok := parseActionLiteral(value); ok {
+		return lit
+	}
+	return renderRuleText(value, row, order)
+}
+
+func parseActionLiteral(value string) (string, bool) {
+	if len(value) < 2 {
+		return "", false
+	}
+	quote := value[0]
+	if quote != '"' && quote != '\'' {
+		return "", false
+	}
+	if value[len(value)-1] != quote {
+		return "", false
+	}
+	var b strings.Builder
+	escaped := false
+	for i := 1; i < len(value)-1; i++ {
+		c := value[i]
+		if escaped {
+			switch c {
+			case 'n':
+				b.WriteByte('\n')
+			case 'r':
+				b.WriteByte('\r')
+			case 't':
+				b.WriteByte('\t')
+			case '\\', '"', '\'':
+				b.WriteByte(c)
+			default:
+				b.WriteByte('\\')
+				b.WriteByte(c)
+			}
+			escaped = false
+			continue
+		}
+		if c == '\\' {
+			escaped = true
+			continue
+		}
+		if c == quote {
+			// Unescaped closing quote before the end => not a single literal.
+			return "", false
+		}
+		b.WriteByte(c)
+	}
+	if escaped {
+		b.WriteByte('\\')
+	}
+	return b.String(), true
+}
 
 func renderRuleText(value string, row Row, order ir.Order) string {
 	return columnExprPattern.ReplaceAllStringFunc(value, func(match string) string {
@@ -982,6 +1078,9 @@ func renderRuleText(value string, row Row, order ir.Order) string {
 }
 
 func renderPostingText(value string, row Row, order ir.Order) string {
+	if lit, ok := parseActionLiteral(value); ok {
+		return lit
+	}
 	rendered := renderRuleText(value, row, order)
 	return evalSimpleArithmetic(rendered)
 }
@@ -1014,14 +1113,16 @@ func evalColumnString(expr string, row Row, order ir.Order) string {
 }
 
 func nextMethod(rest string) (string, string, string) {
-	if strings.HasPrefix(rest, "extract(") || strings.HasPrefix(rest, "format(") {
+	if strings.HasPrefix(rest, "extract(") || strings.HasPrefix(rest, "format(") || strings.HasPrefix(rest, "replace(") {
 		name, _, _ := strings.Cut(rest, "(")
 		end := closingMethodParen(rest)
 		if end < 0 {
 			return rest, "", ""
 		}
 		arg := rest[len(name)+1 : end]
-		arg = strings.Trim(arg, `"'`)
+		if name != "replace" {
+			arg = strings.Trim(arg, `"'`)
+		}
 		return name, arg, rest[end+1:]
 	}
 	if rest != "" && (rest[0] == '+' || rest[0] == '-' || rest[0] == '!') {
@@ -1120,8 +1221,56 @@ func applyColumnMethod(value, method, arg string, row Row, order ir.Order) strin
 			return matches[0]
 		}
 		return ""
+	case "replace":
+		from, to, ok := splitReplaceArgs(arg)
+		if !ok {
+			return value
+		}
+		return strings.ReplaceAll(value, from, to)
 	}
 	return value
+}
+
+func splitReplaceArgs(arg string) (string, string, bool) {
+	arg = strings.TrimSpace(arg)
+	parts := []string{}
+	var quote byte
+	var b strings.Builder
+	started := false
+	for i := 0; i < len(arg); i++ {
+		c := arg[i]
+		if quote != 0 {
+			if c == '\\' && i+1 < len(arg) {
+				b.WriteByte(arg[i+1])
+				i++
+				continue
+			}
+			if c == quote {
+				parts = append(parts, b.String())
+				b.Reset()
+				quote = 0
+				started = false
+				continue
+			}
+			b.WriteByte(c)
+			continue
+		}
+		if c == '"' || c == '\'' {
+			quote = c
+			started = true
+			continue
+		}
+		if c == ',' || c == ' ' || c == '\t' {
+			continue
+		}
+		if !started {
+			return "", "", false
+		}
+	}
+	if len(parts) != 2 {
+		return "", "", false
+	}
+	return parts[0], parts[1], true
 }
 
 func normalizeAmountString(value string) string {

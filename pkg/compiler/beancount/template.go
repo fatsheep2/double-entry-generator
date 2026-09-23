@@ -16,7 +16,7 @@ var normalOrder = `{{ .PayTime.Format "2006-01-02" }} * "{{ EscapeString .Peer }
 
 `
 
-var runtimeOrder = `{{ .PayTime.Format "2006-01-02" }} * "{{ EscapeString .Peer }}" {{- if .Item }} "{{ EscapeString .Item }}"{{ end }}{{ range .Tags }} #{{ . }}{{ end }}{{ if .Note }} ; {{ .Note }}{{ end }}
+var runtimeOrder = `{{ .PayTime.Format "2006-01-02" }} {{ if .Flag }}{{ .Flag }}{{ else }}*{{ end }} "{{ EscapeString .Peer }}" {{- if .Item }} "{{ EscapeString .Item }}"{{ end }}{{ range .Tags }} #{{ . }}{{ end }}{{ range .Links }} ^{{ . }}{{ end }}{{ if .Note }} ; {{ .Note }}{{ end }}
 	{{- range $key, $value := .Metadata }}{{ if $value }}{{ printf "\n" }}	{{ $key }}: "{{ $value }}"{{end}}{{end}}
 	{{- range .Postings }}{{ printf "\n" }}	{{ . }}{{ end }}
 
@@ -47,6 +47,8 @@ type NormalOrderVars struct {
 	Currency          string
 	Metadata          map[string]string // unordered metadata map
 	Tags              []string
+	Flag              string
+	Links             []string
 	Postings          []string
 }
 

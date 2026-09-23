@@ -1,0 +1,39 @@
+personalRules:
+- id: ignore-closed
+  name: 忽略关闭
+  when: <交易状态> == "交易关闭"
+  actions:
+    ignore: true
+- id: coffee
+  name: 咖啡
+  when: (payee ~ "咖啡") && (narration ~ "午餐")
+  actions:
+    from: '"Assets:Cash"'
+    to: '"Expenses:Food"'
+    tag: '"food"'
+    flag: '!'
+    link: '"meal-link"'
+    metadata:
+      source: '"mirato"'
+- id: disabled
+  name: 禁用
+  enabled: false
+  when: payee ~ "禁用商户"
+  actions:
+    to: '"Expenses:ShouldNotApply"'
+- id: starts
+  name: 前缀
+  when: payee ^= "美团"
+  actions:
+    from: '"Assets:Cash"'
+    to: '"Expenses:Delivery"'
+protocolVersion: mirato-deg-rules/1
+requiredCapabilities:
+- when.starts_with
+- when.ends_with
+- when.regex
+- actions.flag
+- actions.link
+- actions.replace
+- actions.quoted_literal
+- rule.templateId
