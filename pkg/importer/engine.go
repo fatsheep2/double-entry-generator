@@ -187,16 +187,38 @@ func parseCSV(profile *Profile, filename string) ([]Row, error) {
 		r = strings.NewReader(strings.ReplaceAll(string(b), "\t", ""))
 	}
 
-	reader := csv.NewReader(r)
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return nil, err
+	}
+	reader := csv.NewReader(bytes.NewReader(data))
 	reader.FieldsPerRecord = -1
 	reader.LazyQuotes = true
 	if delimiter := normalizeDelimiter(profile.Template.Delimiter); delimiter != 0 {
 		reader.Comma = delimiter
 	}
 
-	records, err := reader.ReadAll()
-	if err != nil {
-		return nil, err
+	var records [][]string
+	if profile.Template.HeaderLocate {
+		// encoding/csv skips blank lines. Restore their positions for header
+		// windows so CSV and spreadsheet layouts obey the same contract.
+		// FieldPos identifies logical records, including quoted multiline cells.
+		nextLine := 1
+		var previousOffset int64
+		for {
+			record, readErr := reader.Read()
+			if readErr == io.EOF { break }
+			if readErr != nil { return nil, readErr }
+			startLine, _ := reader.FieldPos(0)
+			for line := nextLine; line < startLine; line++ { records = append(records, nil) }
+			records = append(records, record)
+			offset := reader.InputOffset()
+			nextLine += bytes.Count(data[previousOffset:offset], []byte{'\n'})
+			previousOffset = offset
+		}
+	} else {
+		records, err = reader.ReadAll()
+		if err != nil { return nil, err }
 	}
 	return recordsToRows(profile, records)
 }
@@ -273,6 +295,11 @@ func recordsToRows(profile *Profile, records [][]string) ([]Row, error) {
 	if len(records) <= skip {
 		return nil, fmt.Errorf("no rows after skipLeadingRows=%d", skip)
 	}
+
+	if profile.Template.HeaderLocate {
+		return recordsToRowsHeaderLocate(profile, records, skip)
+	}
+
 	headers := normalizeCells(profile.Template.SourceHeaders)
 	start := skip
 	if len(headers) == 0 {
@@ -284,8 +311,115 @@ func recordsToRows(profile *Profile, records [][]string) ([]Row, error) {
 	if err := validateHeaders(profile, headers); err != nil {
 		return nil, err
 	}
-	rows := make([]Row, 0, len(records)-start)
-	for _, record := range records[start:] {
+	return buildRowsFromRecords(profile, headers, records[start:])
+}
+
+func recordsToRowsHeaderLocate(profile *Profile, records [][]string, skip int) ([]Row, error) {
+	wanted := normalizeCells(profile.Template.SourceHeaders)
+	if len(wanted) == 0 {
+		return nil, fmt.Errorf("headerLocate requires non-empty sourceHeaders")
+	}
+	wantedSet := make(map[string]struct{}, len(wanted))
+	for _, name := range wanted {
+		if name == "" {
+			continue
+		}
+		if _, dup := wantedSet[name]; dup {
+			return nil, fmt.Errorf("sourceHeaders contains duplicate column name %q", name)
+		}
+		wantedSet[name] = struct{}{}
+	}
+	if len(wantedSet) == 0 {
+		return nil, fmt.Errorf("headerLocate requires non-empty sourceHeaders")
+	}
+
+	scanEnd := len(records)
+	if maxRows := profile.Template.HeaderScanMaxRows; maxRows > 0 {
+		if skip+maxRows < scanEnd {
+			scanEnd = skip + maxRows
+		}
+	}
+
+	type candidate struct {
+		index   int
+		headers []string
+	}
+	var candidates []candidate
+	for i := skip; i < scanEnd; i++ {
+		headers := normalizeCells(records[i])
+		if emptyRecord(headers) {
+			continue
+		}
+		if !rowContainsAllHeaders(headers, wantedSet) {
+			continue
+		}
+		// Candidate header row: duplicate column names fail closed immediately.
+		if err := rejectDuplicateHeaderNames(headers); err != nil {
+			return nil, fmt.Errorf("header row at index %d: %w", i, err)
+		}
+		candidates = append(candidates, candidate{index: i, headers: headers})
+	}
+	switch len(candidates) {
+	case 0:
+		return nil, fmt.Errorf(
+			"headerLocate: no header row containing all sourceHeaders within scan window (skipLeadingRows=%d, headerScanMaxRows=%d)",
+			skip, profile.Template.HeaderScanMaxRows,
+		)
+	case 1:
+		// ok
+	default:
+		idxs := make([]string, len(candidates))
+		for i, c := range candidates {
+			idxs[i] = fmt.Sprintf("%d", c.index)
+		}
+		return nil, fmt.Errorf(
+			"headerLocate: ambiguous header rows at indices [%s]; refine skipLeadingRows or sourceHeaders",
+			strings.Join(idxs, ", "),
+		)
+	}
+
+	found := candidates[0]
+	if err := validateHeaders(profile, found.headers); err != nil {
+		return nil, err
+	}
+	return buildRowsFromRecords(profile, found.headers, records[found.index+1:])
+}
+
+func rejectDuplicateHeaderNames(headers []string) error {
+	seen := make(map[string]struct{}, len(headers))
+	for _, h := range headers {
+		h = strings.TrimSpace(h)
+		if h == "" {
+			continue
+		}
+		if _, ok := seen[h]; ok {
+			return fmt.Errorf("duplicate column name %q", h)
+		}
+		seen[h] = struct{}{}
+	}
+	return nil
+}
+
+func rowContainsAllHeaders(headers []string, wanted map[string]struct{}) bool {
+	available := make(map[string]struct{}, len(headers))
+	for _, h := range headers {
+		h = strings.TrimSpace(h)
+		if h == "" {
+			continue
+		}
+		available[h] = struct{}{}
+	}
+	for name := range wanted {
+		if _, ok := available[name]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func buildRowsFromRecords(profile *Profile, headers []string, records [][]string) ([]Row, error) {
+	rows := make([]Row, 0, len(records))
+	for _, record := range records {
 		record = normalizeCells(record)
 		if emptyRecord(record) {
 			continue

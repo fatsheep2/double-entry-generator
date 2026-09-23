@@ -34,6 +34,8 @@ type Template struct {
 	DateFormat      string            `json:"dateFormat,omitempty" yaml:"dateFormat,omitempty"`
 	AmountPrefix    string            `json:"amountPrefix,omitempty" yaml:"amountPrefix,omitempty"`
 	SourceHeaders   []string          `json:"sourceHeaders,omitempty" yaml:"sourceHeaders,omitempty"`
+	HeaderLocate bool `json:"headerLocate,omitempty" yaml:"headerLocate,omitempty"`
+	HeaderScanMaxRows int `json:"headerScanMaxRows,omitempty" yaml:"headerScanMaxRows,omitempty"`
 	Columns         ColumnMapping     `json:"columns,omitempty" yaml:"columns,omitempty"`
 	Metadata        map[string]string `json:"metadata,omitempty" yaml:"metadata,omitempty"`
 	DefaultMinus    string            `json:"defaultMinusAccount,omitempty" yaml:"defaultMinusAccount,omitempty"`
@@ -355,6 +357,7 @@ var SupportedCapabilities = map[string]struct{}{
 	"actions.postingPriceCost":       {},
 	"actions.dynamicPostingPriceCost": {},
 	"rule.templateId":                {},
+	"template.headerLocate":          {},
 }
 
 func (p *Profile) ValidateCapabilities() error {
