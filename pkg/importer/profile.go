@@ -77,9 +77,15 @@ type Actions struct {
 	Ignore    bool              `json:"ignore,omitempty" yaml:"ignore,omitempty"`
 	Flag      string            `json:"flag,omitempty" yaml:"flag,omitempty"`
 	Link      string            `json:"link,omitempty" yaml:"link,omitempty"`
-	Vars      map[string]string `json:"vars,omitempty" yaml:"vars,omitempty"`
-	Metadata  map[string]string `json:"metadata,omitempty" yaml:"metadata,omitempty"`
-	Postings  []string          `json:"postings,omitempty" yaml:"postings,omitempty"`
+	Vars         map[string]string `json:"vars,omitempty" yaml:"vars,omitempty"`
+	Metadata     map[string]string `json:"metadata,omitempty" yaml:"metadata,omitempty"`
+	Postings     []string          `json:"postings,omitempty" yaml:"postings,omitempty"`
+	// PostingsMode controls how Postings combine with auto from/to legs.
+	// "" or "append" (DEG legacy default): render from/to then append Postings.
+	// "replace" (Mirato export): Postings are the complete leg set; do not also
+	// synthesize from/to amounts. Across rules, a later replace overwrites the
+	// prior complete set; later append adds onto it.
+	PostingsMode string `json:"postingsMode,omitempty" yaml:"postingsMode,omitempty"`
 }
 
 type TransferSide struct {
@@ -142,32 +148,34 @@ func (a *Actions) UnmarshalYAML(value *yaml.Node) error {
 		Ignore    bool                      `yaml:"ignore,omitempty"`
 		Flag      flexibleString            `yaml:"flag,omitempty"`
 		Link      flexibleString            `yaml:"link,omitempty"`
-		Vars      map[string]flexibleString `yaml:"vars,omitempty"`
-		Metadata  map[string]flexibleString `yaml:"metadata,omitempty"`
-		Postings  []flexibleString          `yaml:"postings,omitempty"`
+		Vars         map[string]flexibleString `yaml:"vars,omitempty"`
+		Metadata     map[string]flexibleString `yaml:"metadata,omitempty"`
+		Postings     []flexibleString          `yaml:"postings,omitempty"`
+		PostingsMode flexibleString            `yaml:"postingsMode,omitempty"`
 	}
 	var out actions
 	if err := value.Decode(&out); err != nil {
 		return err
 	}
 	*a = Actions{
-		Date:      string(out.Date),
-		Type:      string(out.Type),
-		Note:      string(out.Note),
-		From:      out.From,
-		To:        out.To,
-		Payee:     string(out.Payee),
-		Narration: string(out.Narration),
-		Amount:    string(out.Amount),
-		Currency:  string(out.Currency),
-		Tag:       string(out.Tag),
-		Tags:      out.Tags,
-		Ignore:    out.Ignore,
-		Flag:      string(out.Flag),
-		Link:      string(out.Link),
-		Vars:      flexibleStringMap(out.Vars),
-		Metadata:  flexibleStringMap(out.Metadata),
-		Postings:  flexibleStringSlice(out.Postings),
+		Date:         string(out.Date),
+		Type:         string(out.Type),
+		Note:         string(out.Note),
+		From:         out.From,
+		To:           out.To,
+		Payee:        string(out.Payee),
+		Narration:    string(out.Narration),
+		Amount:       string(out.Amount),
+		Currency:     string(out.Currency),
+		Tag:          string(out.Tag),
+		Tags:         out.Tags,
+		Ignore:       out.Ignore,
+		Flag:         string(out.Flag),
+		Link:         string(out.Link),
+		Vars:         flexibleStringMap(out.Vars),
+		Metadata:     flexibleStringMap(out.Metadata),
+		Postings:     flexibleStringSlice(out.Postings),
+		PostingsMode: string(out.PostingsMode),
 	}
 	return nil
 }
@@ -246,7 +254,8 @@ func isZeroActions(actions Actions) bool {
 		actions.Link == "" &&
 		len(actions.Vars) == 0 &&
 		len(actions.Metadata) == 0 &&
-		len(actions.Postings) == 0
+		len(actions.Postings) == 0 &&
+		actions.PostingsMode == ""
 }
 
 func LoadProfile(path string) (*Profile, error) {
@@ -336,11 +345,16 @@ var SupportedCapabilities = map[string]struct{}{
 	"when.starts_with":       {},
 	"when.ends_with":         {},
 	"when.regex":             {},
+	"when.literalFieldLookup": {},
 	"actions.flag":           {},
 	"actions.link":           {},
 	"actions.replace":        {},
 	"actions.quoted_literal": {},
-	"rule.templateId":        {},
+	"actions.rawColumnRef":           {},
+	"actions.postingsMode":           {},
+	"actions.postingPriceCost":       {},
+	"actions.dynamicPostingPriceCost": {},
+	"rule.templateId":                {},
 }
 
 func (p *Profile) ValidateCapabilities() error {
@@ -359,7 +373,28 @@ func (p *Profile) ValidateCapabilities() error {
 			return fmt.Errorf("unsupported required capability %q (protocolVersion=%q); upgrade DEG or remove the capability requirement", cap, p.ProtocolVersion)
 		}
 	}
+	for _, rule := range p.Rules() {
+		if _, err := normalizePostingsMode(rule.Actions.PostingsMode); err != nil {
+			if rule.ID != "" {
+				return fmt.Errorf("rule %q: %w", rule.ID, err)
+			}
+			return err
+		}
+	}
 	return nil
+}
+
+// normalizePostingsMode returns "append" or "replace". Empty defaults to append
+// for legacy DEG local templates that only listed extra fee legs.
+func normalizePostingsMode(mode string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "", "append":
+		return "append", nil
+	case "replace":
+		return "replace", nil
+	default:
+		return "", fmt.Errorf("unsupported postingsMode %q (want append|replace)", mode)
+	}
 }
 
 func (p *Profile) Rules() []Rule {

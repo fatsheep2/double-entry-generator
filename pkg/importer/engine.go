@@ -447,7 +447,9 @@ func rowToV2Order(profile *Profile, row Row) (ir.Order, bool, error) {
 		if err := applyV2ScalarActions(&order, row, rule.Actions, &ignore, profile.Template.DateFormat); err != nil {
 			return ir.Order{}, false, err
 		}
-		mergeV2Actions(&mergedV2Actions, rule.Actions)
+		if err := mergeV2Actions(&mergedV2Actions, rule.Actions); err != nil {
+			return ir.Order{}, false, err
+		}
 	}
 	if ignore {
 		return order, true, nil
@@ -532,6 +534,8 @@ func ruleInScope(rule Rule, profileID string) bool {
 }
 
 func applyActions(order *ir.Order, row Row, actions Actions, ignore *bool, v2 bool) error {
+	// Sticky ignore (Mirato): true latches; later false/absent never clears.
+	// Later matching rules still run (accounts/tags may change) but order is dropped.
 	if actions.Ignore {
 		*ignore = true
 	}
@@ -624,6 +628,7 @@ func applyActions(order *ir.Order, row Row, actions Actions, ignore *bool, v2 bo
 }
 
 func applyV2ScalarActions(order *ir.Order, row Row, actions Actions, ignore *bool, dateFormat string) error {
+	// Sticky ignore — see applyActions.
 	if actions.Ignore {
 		*ignore = true
 	}
@@ -682,18 +687,14 @@ func applyV2ScalarActions(order *ir.Order, row Row, actions Actions, ignore *boo
 			order.Metadata = map[string]string{}
 		}
 		for key, value := range actions.Metadata {
-			rendered := resolveActionValue(value, row, *order)
-			if rendered == "" {
-				delete(order.Metadata, key)
-				continue
-			}
-			order.Metadata[key] = rendered
+			// Mirato retains empty metadata values; do not delete on "".
+			order.Metadata[key] = resolveActionValue(value, row, *order)
 		}
 	}
 	return nil
 }
 
-func mergeV2Actions(base *Actions, next Actions) {
+func mergeV2Actions(base *Actions, next Actions) error {
 	if !next.From.IsZero() {
 		base.From = mergeTransferSide(base.From, next.From)
 	}
@@ -714,7 +715,25 @@ func mergeV2Actions(base *Actions, next Actions) {
 			base.Vars[key] = value
 		}
 	}
-	base.Postings = append(base.Postings, next.Postings...)
+	// Empty replace must clear the complete set (Mirato semantics). Do not
+	// require len(Postings)>0 — that silently ignored replace: [].
+	modeRaw := strings.TrimSpace(next.PostingsMode)
+	if len(next.Postings) > 0 || modeRaw != "" {
+		mode, err := normalizePostingsMode(next.PostingsMode)
+		if err != nil {
+			return err
+		}
+		if mode == "replace" {
+			base.Postings = append([]string(nil), next.Postings...)
+			base.PostingsMode = "replace"
+		} else if len(next.Postings) > 0 {
+			base.Postings = append(base.Postings, next.Postings...)
+			if base.PostingsMode == "" {
+				base.PostingsMode = "append"
+			}
+		}
+	}
+	return nil
 }
 
 func mergeTransferSide(base, next TransferSide) TransferSide {
@@ -732,22 +751,32 @@ func mergeTransferSide(base, next TransferSide) TransferSide {
 
 func renderV2Postings(order *ir.Order, row Row, actions Actions) error {
 	row = rowWithVars(row, actions.Vars, *order)
-	if !actions.To.IsZero() {
-		posting, err := renderTransferPosting(actions.To, actions.Amount, actions.Currency, "+", row, *order)
-		if err != nil {
-			return err
-		}
-		if posting != "" {
-			order.Postings = append(order.Postings, ir.Posting{Line: posting})
-		}
+	mode, err := normalizePostingsMode(actions.PostingsMode)
+	if err != nil {
+		return err
 	}
-	if !actions.From.IsZero() {
-		posting, err := renderTransferPosting(actions.From, actions.Amount, actions.Currency, "-", row, *order)
-		if err != nil {
-			return err
+	// replace (even empty): Mirato complete leg list — do not also render
+	// automatic from/to (empty replace clears legs; non-empty replaces them).
+	skipAutoLegs := mode == "replace"
+	ccyFallback := firstNonEmptyString(actions.Currency, order.Currency)
+	if !skipAutoLegs {
+		if !actions.To.IsZero() {
+			posting, err := renderTransferPosting(actions.To, actions.Amount, ccyFallback, "+", row, *order)
+			if err != nil {
+				return err
+			}
+			if posting != "" {
+				order.Postings = append(order.Postings, ir.Posting{Line: posting})
+			}
 		}
-		if posting != "" {
-			order.Postings = append(order.Postings, ir.Posting{Line: posting})
+		if !actions.From.IsZero() {
+			posting, err := renderTransferPosting(actions.From, actions.Amount, ccyFallback, "-", row, *order)
+			if err != nil {
+				return err
+			}
+			if posting != "" {
+				order.Postings = append(order.Postings, ir.Posting{Line: posting})
+			}
 		}
 	}
 	for _, line := range actions.Postings {
@@ -844,10 +873,31 @@ func nonEmptyStrings(values []string) []string {
 	return out
 }
 
+// columnLookupMode distinguishes Mirato shared protocols so one <col> helper
+// cannot silently mix condition logical fallback with action raw-only refs.
+type columnLookupMode int
+
+const (
+	lookupCondition columnLookupMode = iota
+	lookupActionRaw
+)
+
+// fieldValue is the shared condition lookup (Mirato baseline). Prefer
+// conditionFieldValue / actionColumnValue at call sites that know the context.
 func fieldValue(field string, row Row, order ir.Order) string {
+	return conditionFieldValue(field, row, order)
+}
+
+// conditionFieldValue implements Mirato↔DEG shared condition lookup:
+//  1. exact Raw key wins (including present empty string);
+//  2. else exact lowercase logical payee|narration|amount|date|currency;
+//  3. else "" — custom columns keep literal identity (no raw./metadata.
+//     namespace strip, no case fold, no peer/item aliases).
+// date.time / date.date / date.timestamp suffixes remain for DEG native when.
+func conditionFieldValue(field string, row Row, order ir.Order) string {
 	field = strings.TrimSpace(field)
 	if base, suffix, ok := strings.Cut(field, "."); ok && (suffix == "time" || suffix == "date" || suffix == "timestamp") {
-		value := fieldValue(base, row, order)
+		value := conditionFieldValue(base, row, order)
 		if base == "date" || base == "交易时间" || value == "" {
 			if suffix == "time" {
 				return order.PayTime.Format("15:04")
@@ -867,32 +917,34 @@ func fieldValue(field string, row Row, order ir.Order) string {
 			return t.Format("2006-01-02")
 		}
 	}
-	switch strings.ToLower(field) {
+	if v, ok := row.Raw[field]; ok {
+		return v
+	}
+	switch field {
 	case "date":
 		return row.Date
 	case "amount":
 		return row.Amount
 	case "currency":
 		return row.Currency
-	case "payee", "peer":
+	case "payee":
 		return row.Payee
-	case "narration", "item":
+	case "narration":
 		return row.Narration
-	case "type":
-		return row.Type
-	case "minusaccount", "minus_account":
-		return order.MinusAccount
-	case "plusaccount", "plus_account":
-		return order.PlusAccount
 	default:
-		if strings.HasPrefix(field, "metadata.") {
-			return row.Metadata[strings.TrimPrefix(field, "metadata.")]
-		}
-		if strings.HasPrefix(field, "raw.") {
-			return row.Raw[strings.TrimPrefix(field, "raw.")]
-		}
-		return row.Raw[field]
+		return ""
 	}
+}
+
+// actionColumnValue implements Mirato __from_column / __regex / __replace:
+// column refs resolve against Raw only. Present empty stays empty; absent → "".
+// Never falls back to logical Row/Order fields (that is condition-only).
+func actionColumnValue(field string, row Row) string {
+	field = strings.TrimSpace(field)
+	if v, ok := row.Raw[field]; ok {
+		return v
+	}
+	return ""
 }
 
 func parseAmount(value, prefix string) (float64, error) {
@@ -1071,6 +1123,12 @@ func resolveActionValue(value string, row Row, order ir.Order) string {
 	return renderRuleText(value, row, order)
 }
 
+func renderRuleTextMode(value string, row Row, order ir.Order, mode columnLookupMode) string {
+	return columnExprPattern.ReplaceAllStringFunc(value, func(match string) string {
+		return evalColumnString(match, row, order, mode)
+	})
+}
+
 func parseActionLiteral(value string) (string, bool) {
 	if len(value) < 2 {
 		return "", false
@@ -1120,8 +1178,16 @@ func parseActionLiteral(value string) (string, bool) {
 }
 
 func renderRuleText(value string, row Row, order ir.Order) string {
+	// Explicit protocol by delimiter (do not unify into one lookup):
+	//   <col>  → Mirato __from_column/__regex/__replace family: Raw only
+	//   [col]  → DEG-native refs (e.g. [amount].number on transfer legs):
+	//            shared condition lookup (raw then five logicals)
 	return columnExprPattern.ReplaceAllStringFunc(value, func(match string) string {
-		return evalColumnString(match, row, order)
+		mode := lookupActionRaw
+		if strings.HasPrefix(match, "[") {
+			mode = lookupCondition
+		}
+		return evalColumnString(match, row, order, mode)
 	})
 }
 
@@ -1175,7 +1241,7 @@ func renderPostingTextStrict(value string, row Row, order ir.Order) (string, err
 	return out, nil
 }
 
-func evalColumnString(expr string, row Row, order ir.Order) string {
+func evalColumnString(expr string, row Row, order ir.Order, mode columnLookupMode) string {
 	if !strings.HasPrefix(expr, "[") && !strings.HasPrefix(expr, "<") {
 		return expr
 	}
@@ -1188,7 +1254,13 @@ func evalColumnString(expr string, row Row, order ir.Order) string {
 		return expr
 	}
 	field := expr[1:end]
-	value := row.Raw[field]
+	var value string
+	switch mode {
+	case lookupActionRaw:
+		value = actionColumnValue(field, row)
+	default:
+		value = conditionFieldValue(field, row, order)
+	}
 	rest := expr[end+1:]
 	for rest != "" {
 		if !strings.HasPrefix(rest, ".") {

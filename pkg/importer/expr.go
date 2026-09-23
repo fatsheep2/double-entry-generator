@@ -294,6 +294,20 @@ func (p *exprParser) parseComparison() (bool, error) {
 	}
 	leftVal := p.valueOf(left)
 	rightVal := p.valueOf(right)
+	// Legacy DEG profiles allow bare RHS literals (e.g. <收/支> == 收入).
+	// Missing LHS fields still resolve to empty; explicit RHS references never
+	// fall back to their spelling. Exported Mirato literals are always quoted.
+	if right.typ == exprTokenValue && rightVal == "" &&
+		!strings.HasPrefix(right.val, "<") && !strings.HasPrefix(right.val, "[") &&
+		!strings.HasPrefix(right.val, "raw[") {
+		if _, present := p.row.Raw[right.val]; !present {
+			switch strings.ToLower(right.val) {
+			case "date", "amount", "currency", "payee", "narration", "type", "method":
+			default:
+				rightVal = right.val
+			}
+		}
+	}
 	return compareValues(leftVal, op.val, rightVal)
 }
 
@@ -321,22 +335,17 @@ func (p *exprParser) valueOf(token exprToken) string {
 		return value
 	}
 	if strings.HasPrefix(token.val, "[") {
-		return evalColumnString(token.val, p.row, p.order)
+		// Conditions use shared Mirato field lookup (raw then five logicals).
+		return evalColumnString(token.val, p.row, p.order, lookupCondition)
 	}
 	if strings.HasPrefix(token.val, "<") {
-		return evalColumnString(token.val, p.row, p.order)
+		return evalColumnString(token.val, p.row, p.order, lookupCondition)
 	}
-	value := fieldValue(token.val, p.row, p.order)
-	if value == "" && !rowHasRawField(p.row, token.val) {
-		return token.val
-	}
-	return value
+	// Mirato baseline: missing/empty fields evaluate to "" — never the field
+	// name literal. Bare identifiers are always field lookups after tokenize.
+	return conditionFieldValue(token.val, p.row, p.order)
 }
 
-func rowHasRawField(row Row, field string) bool {
-	_, ok := row.Raw[field]
-	return ok
-}
 
 func splitRawToken(value string) (string, string) {
 	if !strings.HasPrefix(value, "raw[") {
