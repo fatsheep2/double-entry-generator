@@ -35,17 +35,23 @@ type Order struct {
 	Category        string
 	MerchantOrderID *string
 	OrderID         *string
-	Money           float64
-	Note            string
-	PayTime         time.Time
-	Type            Type // 方向，一般为 收/支
-	TypeOriginal    string
-	TxTypeOriginal  string // 交易类型
-	Method          string
-	Amount          float64
-	Price           float64
-	Currency        string
-	Commission      float64 // 手续费/服务费
+	// Money is the legacy float64 amount used by older providers/compilers.
+	// Runtime v2 / Mirato interop must prefer ExactMoney and must never rebuild
+	// ExactMoney by parsing Money.
+	Money float64
+	// ExactMoney, when non-nil, is the authoritative decimal amount for the
+	// runtime path (parse → rules → IR → Beancount).
+	ExactMoney *Decimal
+	Note           string
+	PayTime        time.Time
+	Type           Type // 方向，一般为 收/支
+	TypeOriginal   string
+	TxTypeOriginal string // 交易类型
+	Method         string
+	Amount         float64
+	Price          float64
+	Currency       string
+	Commission     float64 // 手续费/服务费
 	Units           map[Unit]string
 	ExtraAccounts   map[Account]string
 	MinusAccount    string

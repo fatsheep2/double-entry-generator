@@ -7,6 +7,7 @@ import (
 	"log"
 	"math"
 	"sort"
+	"strconv"
 	"strings"
 	"text/template"
 
@@ -255,7 +256,9 @@ func (b *BeanCount) writeBill(file io.Writer, index int) error {
 			Item:              o.Item,
 			Note:              o.Note,
 			Money:             o.Money,
+			MoneyText:         moneyText(o, o.Money, 2),
 			Commission:        o.Commission,
+			CommissionText:    floatText(o.Commission, 2),
 			PlusAccount:       o.PlusAccount,
 			MinusAccount:      o.MinusAccount,
 			PnlAccount:        o.ExtraAccounts[ir.PnlAccount],
@@ -272,7 +275,9 @@ func (b *BeanCount) writeBill(file io.Writer, index int) error {
 			Item:              o.Item,
 			Note:              o.Note,
 			Money:             o.Money,
+			MoneyText:         moneyText(o, o.Money, 8),
 			Commission:        o.Commission,
+			CommissionText:    floatText(o.Commission, 8),
 			PlusAccount:       o.PlusAccount,
 			MinusAccount:      o.MinusAccount,
 			PnlAccount:        o.ExtraAccounts[ir.PnlAccount],
@@ -407,6 +412,7 @@ func (b *BeanCount) writeBill(file io.Writer, index int) error {
 			Item:         "银行转证券",
 			Note:         o.Note,
 			Money:        o.Money,
+			MoneyText:    moneyText(o, o.Money, 2),
 			PlusAccount:  o.ExtraAccounts[ir.CashAccount],
 			MinusAccount: o.ExtraAccounts[ir.ThirdPartyCustodyAccount],
 			Metadata:     o.Metadata,
@@ -414,12 +420,19 @@ func (b *BeanCount) writeBill(file io.Writer, index int) error {
 			Tags:         o.Tags,
 		})
 	case ir.OrderTypeChinaSecuritiesBrokerTransferToBank: // 证券转银行
+		absMoney := math.Abs(o.Money)
+		absOrder := o
+		if o.ExactMoney != nil {
+			abs := o.ExactMoney.Abs()
+			absOrder.ExactMoney = &abs
+		}
 		err = normalOrderTemplate.Execute(&buf, &NormalOrderVars{
 			PayTime:      o.PayTime,
 			Peer:         o.Peer,
 			Item:         "证券转银行",
 			Note:         o.Note,
-			Money:        math.Abs(o.Money),
+			Money:        absMoney,
+			MoneyText:    moneyText(absOrder, absMoney, 2),
 			PlusAccount:  o.ExtraAccounts[ir.ThirdPartyCustodyAccount],
 			MinusAccount: o.ExtraAccounts[ir.CashAccount],
 			Metadata:     o.Metadata,
@@ -433,6 +446,7 @@ func (b *BeanCount) writeBill(file io.Writer, index int) error {
 			Item:         "利息归本",
 			Note:         o.Note,
 			Money:        o.Money,
+			MoneyText:    moneyText(o, o.Money, 2),
 			PlusAccount:  o.ExtraAccounts[ir.CashAccount],
 			MinusAccount: o.ExtraAccounts[ir.PnlAccount],
 			Metadata:     o.Metadata,
@@ -447,6 +461,7 @@ func (b *BeanCount) writeBill(file io.Writer, index int) error {
 			Item:         "红利入账-" + o.Item,
 			Note:         o.Note,
 			Money:        o.Money,
+			MoneyText:    moneyText(o, o.Money, 2),
 			PlusAccount:  o.ExtraAccounts[ir.CashAccount],
 			MinusAccount: o.ExtraAccounts[ir.PnlAccount],
 			Metadata:     o.Metadata,
@@ -491,4 +506,17 @@ func postingAccount(line string) string {
 		return fields[0]
 	}
 	return ""
+}
+
+// moneyText prefers ExactMoney (authoritative decimal) over float formatting.
+func moneyText(o ir.Order, fallback float64, minScale int) string {
+	if o.ExactMoney != nil {
+		scale := uint32(minScale)
+		return o.ExactMoney.Text(scale)
+	}
+	return floatText(fallback, minScale)
+}
+
+func floatText(v float64, minScale int) string {
+	return strconv.FormatFloat(v, 'f', minScale, 64)
 }

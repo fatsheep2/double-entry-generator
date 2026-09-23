@@ -376,17 +376,18 @@ func compareValues(left, op, right string) (bool, error) {
 		loc := re.FindStringIndex(left)
 		return loc != nil && loc[0] == 0 && loc[1] == len(left), nil
 	case ">", ">=", "<", "<=":
-		if l, lOK := parseComparableNumber(left); lOK {
-			if r, rOK := parseComparableNumber(right); rOK {
+		if l, lErr := ParseAmountDecimal(left, ""); lErr == nil {
+			if r, rErr := ParseAmountDecimal(right, ""); rErr == nil {
+				cmp := l.Cmp(r)
 				switch op {
 				case ">":
-					return l > r, nil
+					return cmp > 0, nil
 				case ">=":
-					return l >= r, nil
+					return cmp >= 0, nil
 				case "<":
-					return l < r, nil
+					return cmp < 0, nil
 				case "<=":
-					return l <= r, nil
+					return cmp <= 0, nil
 				}
 			}
 		}
@@ -402,15 +403,6 @@ func compareValues(left, op, right string) (bool, error) {
 		}
 	}
 	return false, fmt.Errorf("unsupported operator %q", op)
-}
-
-func parseComparableNumber(value string) (float64, bool) {
-	cleaned := strings.NewReplacer(",", "", "¥", "", "￥", "", "$", "", "CNY", "", "RMB", "").Replace(strings.TrimSpace(value))
-	if !regexp.MustCompile(`^[+-]?\d+(\.\d+)?$`).MatchString(cleaned) {
-		return 0, false
-	}
-	n, err := strconv.ParseFloat(cleaned, 64)
-	return n, err == nil
 }
 
 func (p *exprParser) peek() exprToken {
