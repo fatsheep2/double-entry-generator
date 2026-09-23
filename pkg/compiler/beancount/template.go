@@ -16,8 +16,8 @@ var normalOrder = `{{ .PayTime.Format "2006-01-02" }} * "{{ EscapeString .Peer }
 
 `
 
-var runtimeOrder = `{{ .PayTime.Format "2006-01-02" }} {{ if .Flag }}{{ .Flag }}{{ else }}*{{ end }} "{{ EscapeString .Peer }}" {{- if .Item }} "{{ EscapeString .Item }}"{{ end }}{{ range .Tags }} #{{ . }}{{ end }}{{ range .Links }} ^{{ . }}{{ end }}{{ if .Note }} ; {{ .Note }}{{ end }}
-	{{- range $key, $value := .Metadata }}{{ if $value }}{{ printf "\n" }}	{{ $key }}: "{{ $value }}"{{end}}{{end}}
+var runtimeOrder = `{{ .PayTime.Format "2006-01-02" }} {{ if .Flag }}{{ .Flag }}{{ else }}*{{ end }} "{{ EscapeString .Peer }}" "{{ EscapeString .Item }}"{{ range .Tags }} #{{ . }}{{ end }}{{ range .Links }} ^{{ . }}{{ end }}{{ if .Note }} ; {{ .Note }}{{ end }}
+	{{- range $key, $value := .Metadata }}{{ printf "\n" }}	{{ $key }}: "{{ $value }}"{{end}}
 	{{- range .Postings }}{{ printf "\n" }}	{{ . }}{{ end }}
 
 `
