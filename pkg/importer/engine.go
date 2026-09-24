@@ -591,7 +591,7 @@ func rowToV2Order(profile *Profile, row Row) (ir.Order, bool, error) {
 	if order.PayTime.IsZero() {
 		return ir.Order{}, false, fmt.Errorf("runtime v2 rule did not set date")
 	}
-	if err := renderV2Postings(&order, row, mergedV2Actions); err != nil {
+	if err := renderV2Postings(&order, row, mergedV2Actions, profile.Template.DefaultMinus, profile.Template.DefaultPlus); err != nil {
 		return ir.Order{}, false, err
 	}
 	return order, false, nil
@@ -883,7 +883,7 @@ func mergeTransferSide(base, next TransferSide) TransferSide {
 	return base
 }
 
-func renderV2Postings(order *ir.Order, row Row, actions Actions) error {
+func renderV2Postings(order *ir.Order, row Row, actions Actions, defaultMinus, defaultPlus string) error {
 	row = rowWithVars(row, actions.Vars, *order)
 	mode, err := normalizePostingsMode(actions.PostingsMode)
 	if err != nil {
@@ -910,6 +910,35 @@ func renderV2Postings(order *ir.Order, row Row, actions Actions) error {
 			}
 			if posting != "" {
 				order.Postings = append(order.Postings, ir.Posting{Line: posting})
+			}
+		}
+		// 单侧补齐（2026-09-24）：规则只给一侧账户时，用模板默认账户补另一侧。
+		// 原来只输出一侧 → 账本不平衡（官方 loader: Transaction does not balance）。
+		// 模板没声明对应默认账户时无法补齐：保留旧行为，但打警告（不静默）。
+		if !actions.To.IsZero() && actions.From.IsZero() {
+			if defaultMinus == "" {
+				fmt.Fprintf(os.Stderr, "[single-leg] rule set only `to` and template has no defaultMinusAccount; ledger will not balance\n")
+			} else {
+				posting, err := renderTransferPosting(TransferSide{Account: defaultMinus}, actions.Amount, ccyFallback, "-", row, *order)
+				if err != nil {
+					return err
+				}
+				if posting != "" {
+					order.Postings = append(order.Postings, ir.Posting{Line: posting})
+				}
+			}
+		}
+		if !actions.From.IsZero() && actions.To.IsZero() {
+			if defaultPlus == "" {
+				fmt.Fprintf(os.Stderr, "[single-leg] rule set only `from` and template has no defaultPlusAccount; ledger will not balance\n")
+			} else {
+				posting, err := renderTransferPosting(TransferSide{Account: defaultPlus}, actions.Amount, ccyFallback, "+", row, *order)
+				if err != nil {
+					return err
+				}
+				if posting != "" {
+					order.Postings = append(order.Postings, ir.Posting{Line: posting})
+				}
 			}
 		}
 	}
