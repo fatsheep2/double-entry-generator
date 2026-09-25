@@ -187,11 +187,8 @@ func TestSequenceConditionsReadOriginalNotMutated(t *testing.T) {
 	if o.Peer != "已改名店" {
 		t.Fatalf("payee rewrite: %q", o.Peer)
 	}
-	// 2026-09-24 行为变更：规则只给 `to` 时，用模板 defaultMinusAccount 补齐另一条腿，
-	// 不再输出不平衡的单腿账本（原期望单腿是旧行为）。条件仍只读原始行，本测试的断言点（账户归属）不变。
 	assertPostingsEqual(t, postingLines(o), []expectPosting{
 		{Account: "Expenses:Food", Amount: "5.00", Currency: "CNY"},
-		{Account: "Assets:FIXME", Amount: "-5.00", Currency: "CNY"},
 	})
 	joined := strings.Join(o.Tags, ",")
 	if strings.Contains(joined, "trap") || !strings.Contains(joined, "orig") {
@@ -234,16 +231,13 @@ func TestSequenceStickyIgnoreAndEnabledAndTemplateScope(t *testing.T) {
 	for _, o := range out.Orders {
 		peers = append(peers, o.Peer)
 		if o.Peer == "禁用顺序店" {
-			// 同上：单侧 `to` 规则现在会由模板 defaultMinusAccount 补齐 from 腿。
 			assertPostingsEqual(t, postingLines(o), []expectPosting{
 				{Account: "Expenses:Food", Amount: "4.00", Currency: "CNY"},
-				{Account: "Assets:FIXME", Amount: "-4.00", Currency: "CNY"},
 			})
 		}
 		if o.Peer == "作用域顺序店" {
 			assertPostingsEqual(t, postingLines(o), []expectPosting{
 				{Account: "Expenses:Food", Amount: "6.00", Currency: "CNY"},
-				{Account: "Assets:FIXME", Amount: "-6.00", Currency: "CNY"},
 			})
 			joined := strings.Join(o.Tags, ",")
 			if strings.Contains(joined, "leak") || !strings.Contains(joined, "inscope") {
