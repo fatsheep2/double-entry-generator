@@ -10,8 +10,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"unicode"
 	"time"
+	"unicode"
 
 	"github.com/deb-sig/double-entry-generator/v2/pkg/ir"
 	xlsreader "github.com/shakinm/xlsReader/xls"
@@ -207,10 +207,16 @@ func parseCSV(profile *Profile, filename string) ([]Row, error) {
 		var previousOffset int64
 		for {
 			record, readErr := reader.Read()
-			if readErr == io.EOF { break }
-			if readErr != nil { return nil, readErr }
+			if readErr == io.EOF {
+				break
+			}
+			if readErr != nil {
+				return nil, readErr
+			}
 			startLine, _ := reader.FieldPos(0)
-			for line := nextLine; line < startLine; line++ { records = append(records, nil) }
+			for line := nextLine; line < startLine; line++ {
+				records = append(records, nil)
+			}
 			records = append(records, record)
 			offset := reader.InputOffset()
 			nextLine += bytes.Count(data[previousOffset:offset], []byte{'\n'})
@@ -218,7 +224,9 @@ func parseCSV(profile *Profile, filename string) ([]Row, error) {
 		}
 	} else {
 		records, err = reader.ReadAll()
-		if err != nil { return nil, err }
+		if err != nil {
+			return nil, err
+		}
 	}
 	return recordsToRows(profile, records)
 }
@@ -449,7 +457,7 @@ func buildRowsFromRecords(profile *Profile, headers []string, records [][]string
 			Metadata:  metadata,
 			Raw:       raw,
 		}
-		if !profile.IsV2() && strings.TrimSpace(row.Amount) == "" {
+		if !profile.IsV2() && !profile.Template.HasSlotContract() && strings.TrimSpace(row.Amount) == "" {
 			continue
 		}
 		rows = append(rows, row)
@@ -530,6 +538,9 @@ func nonEmptyAmount(value string) bool {
 }
 
 func rowToImportOrder(profile *Profile, row Row) (ir.Order, bool, error) {
+	if profile.Template.HasSlotContract() {
+		return rowToSlotOrder(profile, row)
+	}
 	if !profile.IsV2() {
 		return rowToOrder(profile, row)
 	}
@@ -1027,9 +1038,16 @@ func fieldValue(field string, row Row, order ir.Order) string {
 //  2. else exact lowercase logical payee|narration|amount|date|currency;
 //  3. else "" — custom columns keep literal identity (no raw./metadata.
 //     namespace strip, no case fold, no peer/item aliases).
+//
 // date.time / date.date / date.timestamp suffixes remain for DEG native when.
 func conditionFieldValue(field string, row Row, order ir.Order) string {
 	field = strings.TrimSpace(field)
+	if key, ok := strings.CutPrefix(field, "metadata."); ok && key != "" && !strings.Contains(key, ".") {
+		if row.Metadata == nil {
+			return ""
+		}
+		return row.Metadata[key]
+	}
 	if base, suffix, ok := strings.Cut(field, "."); ok && (suffix == "time" || suffix == "date" || suffix == "timestamp") {
 		value := conditionFieldValue(base, row, order)
 		if base == "date" || base == "交易时间" || value == "" {
@@ -1248,6 +1266,7 @@ var columnExprPattern = regexp.MustCompile(`(?:\[([^\]]+)\]|<([^>]+)>)((?:\.(?:e
 // resolveActionValue implements the Mirato↔DEG action literal/ref protocol:
 //   - fully quoted "..." / '...' => string literal (escapes: \\ \" \' \n \r \t)
 //   - otherwise interpolate <col> / [col] refs (and methods) via renderRuleText
+//
 // Fixed text such as "<金额>", "payee", or "1+2" must be quoted so it is not
 // treated as a column ref or arithmetic expression.
 func resolveActionValue(value string, row Row, order ir.Order) string {
