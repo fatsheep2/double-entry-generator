@@ -88,26 +88,25 @@ make test
 
 文档文件位于 `docs/` 目录下，使用 Markdown 格式。
 
-### 🔧 添加新的 Provider
+### 🔧 添加新的账单格式：模板优先
 
-如果您想添加新的数据源支持：
+普通账单格式应优先提交到 [`deb-sig/deg-provider-template`](https://github.com/deb-sig/deg-provider-template)。模板仓库提供 v2 schema 规范、最小示例、注册表格式和自动校验；贡献必须包含 `template.yaml`、`rules.yaml`、脱敏账单样例和精确的 `expected.beancount`。
 
-1. **创建 Provider 目录**
-   ```bash
-   mkdir pkg/provider/your-provider
-   ```
+先用以下标准判断：
 
-2. **实现接口**
-   - `pkg/provider/interface.go` 中定义的接口
-   - 参考现有 provider 的实现
+- CSV、XLS、XLSX、表头跳过、编码/分隔符差异、退款、手续费、转账、投资分录和辅助行，都先尝试通用模板。
+- 能用条件、字段方法、算术、`vars`、`from` / `to` 或显式 `postings` 表达的逻辑，留在模板规则中。
+- 只有确实需要跨行状态、多文件或外部数据合并、通用 reader 不支持的容器格式，或无法由现有 actions 表达的输出语义时，才提出 Go provider。
+- 规则很多、性能顾虑或格式陌生本身不构成新增 Go provider 的理由。
 
-3. **添加测试**
-   - 在 `test/` 目录下添加测试脚本
-   - 提供示例数据文件
+模板贡献流程：
 
-4. **更新文档**
-   - 在 `docs/providers/` 下添加文档
-   - 更新 README 和导航
+1. 按模板仓库的 `CONTRIBUTING.md` 复制最接近的示例。
+2. 将账单格式语义放入 `templateRules`，把用户账户选择放入可编辑的 `personalRules`。
+3. 新增 `latest/` 与不可变的 `YYYY-MM-DD/` pin，并登记到 `registry.yaml`。
+4. 使用当前 DEG `main` 运行 `scripts/verify.sh`，验证 schema、注册表、`config init`、`import` 和期望输出。
+
+如模板确实无法表达，请在 DEG Issue 中提供最小化、已脱敏的样例，指出具体能力缺口，并说明为何现有规则/actions 不足。获准使用 Go provider 后，再实现接口、单元测试、端到端样例和 provider 文档。
 
 ## 提交规范
 

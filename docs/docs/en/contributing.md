@@ -88,26 +88,25 @@ Documentation contributions include:
 
 Documentation files are located in the `docs/` directory, using Markdown format.
 
-### 🔧 Adding a New Provider
+### 🔧 Adding a Bill Format: Template First
 
-If you want to add support for a new data source:
+Ordinary bill formats should be contributed to [`deb-sig/deg-provider-template`](https://github.com/deb-sig/deg-provider-template) first. That repository provides the v2 schema reference, a minimal example, registry format, and automated verification. A complete contribution includes `template.yaml`, `rules.yaml`, a sanitized bill fixture, and exact `expected.beancount` output.
 
-1. **Create Provider directory**
-   ```bash
-   mkdir pkg/provider/your-provider
-   ```
+Use these decision criteria:
 
-2. **Implement interfaces**
-   - Interfaces defined in `pkg/provider/interface.go`
-   - Reference existing provider implementations
+- CSV, XLS, XLSX, skipped headers, encoding or delimiter differences, refunds, fees, transfers, investments, and helper rows are all generic-template candidates.
+- Logic expressible with conditions, field methods, arithmetic, `vars`, `from` / `to`, or explicit `postings` stays in template rules.
+- Propose a Go provider only for required cross-row state, multi-file or external-data joins, a container format the generic reader cannot decode, or output semantics that existing actions cannot express.
+- A large rule file, performance concerns, or an unfamiliar format is not by itself a reason for Go code.
 
-3. **Add tests**
-   - Add test scripts in the `test/` directory
-   - Provide sample data files
+Template contribution workflow:
 
-4. **Update documentation**
-   - Add documentation under `docs/providers/`
-   - Update README and navigation
+1. Follow `CONTRIBUTING.md` in the template repository and copy the closest example.
+2. Keep bill-format behavior in `templateRules` and user account choices in editable `personalRules`.
+3. Add `latest/` and an immutable `YYYY-MM-DD/` pin, then register both in `registry.yaml`.
+4. Run `scripts/verify.sh` against current DEG `main` to validate the schema, registry, `config init`, `import`, and expected output.
+
+If the template model is genuinely insufficient, open a DEG issue with a minimized, sanitized sample, identify the exact missing capability, and explain why existing rules/actions cannot represent it. Once a Go provider is justified, implement the interfaces, unit tests, end-to-end fixture, and provider documentation.
 
 ## Commit Convention
 

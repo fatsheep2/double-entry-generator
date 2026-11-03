@@ -163,7 +163,7 @@ For more examples, please check the [Examples Documentation](https://deb-sig.git
 ```
 
 The architecture supports extension:
-- Add new bill formats: Implement new [provider](pkg/provider)
+- Add new bill formats: contribute a generic template to [`deg-provider-template`](https://github.com/deb-sig/deg-provider-template) first; implement a new [Go provider](pkg/provider) only when the template model is insufficient
 - Add new accounting languages: Implement new [compiler](pkg/compiler)
 
 ## 📚 Documentation
@@ -197,6 +197,8 @@ For more issues, please check [GitHub Issues](https://github.com/deb-sig/double-
 ## 🤝 Contributing
 
 Contributions to code and documentation are welcome! Please check the [Contributing Guide](https://deb-sig.github.io/double-entry-generator/contributing/).
+
+New bill formats follow a template-first policy: start with the executable examples and checks in [`deg-provider-template`](https://github.com/deb-sig/deg-provider-template). A Go provider is reviewed only for cross-row state, multi-file joins, unsupported container formats, or output semantics that template rules cannot express.
 
 ### How to Contribute
 

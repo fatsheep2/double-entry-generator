@@ -9,6 +9,8 @@ description: 使用运行时模板和规则导入账单
 
 通用模板 Provider 的目标是把“账单格式”和“导入规则”从 DEG 本体中拆出来。DEG 本体只负责读取账单、解释模板、执行规则并输出 beancount/ledger；具体账单格式由模板仓库维护。这样新增和更新 provider 时，更多工作可以集中在模板和规则文件上，DEG 开发可以更专注于规则引擎、导入体验和输出能力本身。
 
+新增账单格式默认提交到 [`deb-sig/deg-provider-template`](https://github.com/deb-sig/deg-provider-template)。该仓库包含 v2 schema、最小示例、贡献清单和与当前 DEG `main` 对齐的自动验证。只有跨行状态、多文件合并、未支持的容器格式或现有 actions 无法表达的输出语义，才需要提议特有 Go provider。
+
 ## 基本流程
 
 ```text

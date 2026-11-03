@@ -9,6 +9,8 @@ Traditional providers require new Go packages, provider registration, analyser/c
 
 The generic template provider separates bill format support from DEG itself. DEG reads bills, interprets templates, runs rules, and writes beancount/ledger output. Bill-specific formats live in the template registry. This makes provider updates lighter and lets DEG development focus on the import engine, rule model, output behavior, and user experience.
 
+Contribute new bill formats to [`deb-sig/deg-provider-template`](https://github.com/deb-sig/deg-provider-template) by default. That repository contains the v2 schema reference, a minimal example, a contribution checklist, and automated verification against current DEG `main`. Propose a custom Go provider only for required cross-row state, multi-file joins, unsupported container formats, or output semantics that existing actions cannot express.
+
 ## Flow
 
 ```text

@@ -15,6 +15,8 @@ type Profile struct {
 	Schema                string            `json:"schema,omitempty" yaml:"schema,omitempty"`
 	ID                    string            `json:"id,omitempty" yaml:"id,omitempty"`
 	Name                  string            `json:"name,omitempty" yaml:"name,omitempty"`
+	ProtocolVersion       string            `json:"protocolVersion,omitempty" yaml:"protocolVersion,omitempty"`
+	RequiredCapabilities  []string          `json:"requiredCapabilities,omitempty" yaml:"requiredCapabilities,omitempty"`
 	Template              Template          `json:"template" yaml:"template"`
 	TemplateRules         []Rule            `json:"templateRules,omitempty" yaml:"templateRules,omitempty"`
 	TemplateRuleOverrides []Rule            `json:"templateRuleOverrides,omitempty" yaml:"templateRuleOverrides,omitempty"`
@@ -32,6 +34,8 @@ type Template struct {
 	DateFormat      string            `json:"dateFormat,omitempty" yaml:"dateFormat,omitempty"`
 	AmountPrefix    string            `json:"amountPrefix,omitempty" yaml:"amountPrefix,omitempty"`
 	SourceHeaders   []string          `json:"sourceHeaders,omitempty" yaml:"sourceHeaders,omitempty"`
+	HeaderLocate bool `json:"headerLocate,omitempty" yaml:"headerLocate,omitempty"`
+	HeaderScanMaxRows int `json:"headerScanMaxRows,omitempty" yaml:"headerScanMaxRows,omitempty"`
 	Columns         ColumnMapping     `json:"columns,omitempty" yaml:"columns,omitempty"`
 	Metadata        map[string]string `json:"metadata,omitempty" yaml:"metadata,omitempty"`
 	DefaultMinus    string            `json:"defaultMinusAccount,omitempty" yaml:"defaultMinusAccount,omitempty"`
@@ -52,11 +56,12 @@ type ColumnMapping struct {
 }
 
 type Rule struct {
-	ID      string  `json:"id,omitempty" yaml:"id,omitempty"`
-	Name    string  `json:"name,omitempty" yaml:"name,omitempty"`
-	Enabled *bool   `json:"enabled,omitempty" yaml:"enabled,omitempty"`
-	When    string  `json:"when,omitempty" yaml:"when,omitempty"`
-	Actions Actions `json:"actions,omitempty" yaml:"actions,omitempty"`
+	ID         string  `json:"id,omitempty" yaml:"id,omitempty"`
+	Name       string  `json:"name,omitempty" yaml:"name,omitempty"`
+	Enabled    *bool   `json:"enabled,omitempty" yaml:"enabled,omitempty"`
+	TemplateID string  `json:"templateId,omitempty" yaml:"templateId,omitempty"`
+	When       string  `json:"when,omitempty" yaml:"when,omitempty"`
+	Actions    Actions `json:"actions,omitempty" yaml:"actions,omitempty"`
 }
 
 type Actions struct {
@@ -72,9 +77,17 @@ type Actions struct {
 	Tag       string            `json:"tag,omitempty" yaml:"tag,omitempty"`
 	Tags      []string          `json:"tags,omitempty" yaml:"tags,omitempty"`
 	Ignore    bool              `json:"ignore,omitempty" yaml:"ignore,omitempty"`
-	Vars      map[string]string `json:"vars,omitempty" yaml:"vars,omitempty"`
-	Metadata  map[string]string `json:"metadata,omitempty" yaml:"metadata,omitempty"`
-	Postings  []string          `json:"postings,omitempty" yaml:"postings,omitempty"`
+	Flag      string            `json:"flag,omitempty" yaml:"flag,omitempty"`
+	Link      string            `json:"link,omitempty" yaml:"link,omitempty"`
+	Vars         map[string]string `json:"vars,omitempty" yaml:"vars,omitempty"`
+	Metadata     map[string]string `json:"metadata,omitempty" yaml:"metadata,omitempty"`
+	Postings     []string          `json:"postings,omitempty" yaml:"postings,omitempty"`
+	// PostingsMode controls how Postings combine with auto from/to legs.
+	// "" or "append" (DEG legacy default): render from/to then append Postings.
+	// "replace" (Mirato export): Postings are the complete leg set; do not also
+	// synthesize from/to amounts. Across rules, a later replace overwrites the
+	// prior complete set; later append adds onto it.
+	PostingsMode string `json:"postingsMode,omitempty" yaml:"postingsMode,omitempty"`
 }
 
 type TransferSide struct {
@@ -99,22 +112,24 @@ func (s *flexibleString) UnmarshalYAML(value *yaml.Node) error {
 
 func (r *Rule) UnmarshalYAML(value *yaml.Node) error {
 	type rule struct {
-		ID      string         `yaml:"id,omitempty"`
-		Name    string         `yaml:"name,omitempty"`
-		Enabled *bool          `yaml:"enabled,omitempty"`
-		When    flexibleString `yaml:"when,omitempty"`
-		Actions Actions        `yaml:"actions,omitempty"`
+		ID         string         `yaml:"id,omitempty"`
+		Name       string         `yaml:"name,omitempty"`
+		Enabled    *bool          `yaml:"enabled,omitempty"`
+		TemplateID string         `yaml:"templateId,omitempty"`
+		When       flexibleString `yaml:"when,omitempty"`
+		Actions    Actions        `yaml:"actions,omitempty"`
 	}
 	var out rule
 	if err := value.Decode(&out); err != nil {
 		return err
 	}
 	*r = Rule{
-		ID:      out.ID,
-		Name:    out.Name,
-		Enabled: out.Enabled,
-		When:    string(out.When),
-		Actions: out.Actions,
+		ID:         out.ID,
+		Name:       out.Name,
+		Enabled:    out.Enabled,
+		TemplateID: out.TemplateID,
+		When:       string(out.When),
+		Actions:    out.Actions,
 	}
 	return nil
 }
@@ -133,30 +148,36 @@ func (a *Actions) UnmarshalYAML(value *yaml.Node) error {
 		Tag       flexibleString            `yaml:"tag,omitempty"`
 		Tags      []string                  `yaml:"tags,omitempty"`
 		Ignore    bool                      `yaml:"ignore,omitempty"`
-		Vars      map[string]flexibleString `yaml:"vars,omitempty"`
-		Metadata  map[string]flexibleString `yaml:"metadata,omitempty"`
-		Postings  []flexibleString          `yaml:"postings,omitempty"`
+		Flag      flexibleString            `yaml:"flag,omitempty"`
+		Link      flexibleString            `yaml:"link,omitempty"`
+		Vars         map[string]flexibleString `yaml:"vars,omitempty"`
+		Metadata     map[string]flexibleString `yaml:"metadata,omitempty"`
+		Postings     []flexibleString          `yaml:"postings,omitempty"`
+		PostingsMode flexibleString            `yaml:"postingsMode,omitempty"`
 	}
 	var out actions
 	if err := value.Decode(&out); err != nil {
 		return err
 	}
 	*a = Actions{
-		Date:      string(out.Date),
-		Type:      string(out.Type),
-		Note:      string(out.Note),
-		From:      out.From,
-		To:        out.To,
-		Payee:     string(out.Payee),
-		Narration: string(out.Narration),
-		Amount:    string(out.Amount),
-		Currency:  string(out.Currency),
-		Tag:       string(out.Tag),
-		Tags:      out.Tags,
-		Ignore:    out.Ignore,
-		Vars:      flexibleStringMap(out.Vars),
-		Metadata:  flexibleStringMap(out.Metadata),
-		Postings:  flexibleStringSlice(out.Postings),
+		Date:         string(out.Date),
+		Type:         string(out.Type),
+		Note:         string(out.Note),
+		From:         out.From,
+		To:           out.To,
+		Payee:        string(out.Payee),
+		Narration:    string(out.Narration),
+		Amount:       string(out.Amount),
+		Currency:     string(out.Currency),
+		Tag:          string(out.Tag),
+		Tags:         out.Tags,
+		Ignore:       out.Ignore,
+		Flag:         string(out.Flag),
+		Link:         string(out.Link),
+		Vars:         flexibleStringMap(out.Vars),
+		Metadata:     flexibleStringMap(out.Metadata),
+		Postings:     flexibleStringSlice(out.Postings),
+		PostingsMode: string(out.PostingsMode),
 	}
 	return nil
 }
@@ -231,9 +252,12 @@ func isZeroActions(actions Actions) bool {
 		actions.Tag == "" &&
 		len(actions.Tags) == 0 &&
 		!actions.Ignore &&
+		actions.Flag == "" &&
+		actions.Link == "" &&
 		len(actions.Vars) == 0 &&
 		len(actions.Metadata) == 0 &&
-		len(actions.Postings) == 0
+		len(actions.Postings) == 0 &&
+		actions.PostingsMode == ""
 }
 
 func LoadProfile(path string) (*Profile, error) {
@@ -252,6 +276,11 @@ func LoadProfile(path string) (*Profile, error) {
 func loadProfileBytes(b []byte, fallbackID string) (*Profile, error) {
 	var p Profile
 	if err := yaml.Unmarshal(b, &p); err != nil {
+		return nil, err
+	}
+	// Reject incompatible base profiles before later rule files can replace
+	// their protocol annotation during CLI assembly.
+	if err := p.ValidateCapabilities(); err != nil {
 		return nil, err
 	}
 	if p.ID == "" {
@@ -310,6 +339,65 @@ func (t Template) hasNoColumns() bool {
 
 func (p *Profile) IsV2() bool {
 	return strings.Contains(strings.ToLower(p.Schema), "/v2")
+}
+
+// SupportedCapabilities lists runtime features this DEG build implements for
+// Mirato personal-rules exports. Unknown requiredCapabilities must fail closed.
+var SupportedCapabilities = map[string]struct{}{
+	"when.starts_with":       {},
+	"when.ends_with":         {},
+	"when.regex":             {},
+	"when.literalFieldLookup": {},
+	"actions.flag":           {},
+	"actions.link":           {},
+	"actions.replace":        {},
+	"actions.quoted_literal": {},
+	"actions.rawColumnRef":           {},
+	"actions.postingsMode":           {},
+	"actions.postingPriceCost":       {},
+	"actions.dynamicPostingPriceCost": {},
+	"rule.templateId":                {},
+	"template.headerLocate":          {},
+}
+
+func (p *Profile) ValidateCapabilities() error {
+	if p == nil {
+		return nil
+	}
+	if p.ProtocolVersion != "" && p.ProtocolVersion != "mirato-deg-rules/1" {
+		return fmt.Errorf("unsupported protocolVersion %q; upgrade DEG before importing these rules", p.ProtocolVersion)
+	}
+	for _, cap := range p.RequiredCapabilities {
+		cap = strings.TrimSpace(cap)
+		if cap == "" {
+			continue
+		}
+		if _, ok := SupportedCapabilities[cap]; !ok {
+			return fmt.Errorf("unsupported required capability %q (protocolVersion=%q); upgrade DEG or remove the capability requirement", cap, p.ProtocolVersion)
+		}
+	}
+	for _, rule := range p.Rules() {
+		if _, err := normalizePostingsMode(rule.Actions.PostingsMode); err != nil {
+			if rule.ID != "" {
+				return fmt.Errorf("rule %q: %w", rule.ID, err)
+			}
+			return err
+		}
+	}
+	return nil
+}
+
+// normalizePostingsMode returns "append" or "replace". Empty defaults to append
+// for legacy DEG local templates that only listed extra fee legs.
+func normalizePostingsMode(mode string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "", "append":
+		return "append", nil
+	case "replace":
+		return "replace", nil
+	default:
+		return "", fmt.Errorf("unsupported postingsMode %q (want append|replace)", mode)
+	}
 }
 
 func (p *Profile) Rules() []Rule {

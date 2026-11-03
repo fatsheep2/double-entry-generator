@@ -5,12 +5,12 @@ import (
 	"encoding/csv"
 	"fmt"
 	"io"
-	"math"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
 	"time"
 
 	"github.com/deb-sig/double-entry-generator/v2/pkg/ir"
@@ -32,6 +32,9 @@ type Row struct {
 }
 
 func ImportFile(profile *Profile, filename string) (*ir.IR, error) {
+	if err := profile.ValidateCapabilities(); err != nil {
+		return nil, err
+	}
 	rows, err := ParseFile(profile, filename)
 	if err != nil {
 		return nil, err
@@ -184,16 +187,38 @@ func parseCSV(profile *Profile, filename string) ([]Row, error) {
 		r = strings.NewReader(strings.ReplaceAll(string(b), "\t", ""))
 	}
 
-	reader := csv.NewReader(r)
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return nil, err
+	}
+	reader := csv.NewReader(bytes.NewReader(data))
 	reader.FieldsPerRecord = -1
 	reader.LazyQuotes = true
 	if delimiter := normalizeDelimiter(profile.Template.Delimiter); delimiter != 0 {
 		reader.Comma = delimiter
 	}
 
-	records, err := reader.ReadAll()
-	if err != nil {
-		return nil, err
+	var records [][]string
+	if profile.Template.HeaderLocate {
+		// encoding/csv skips blank lines. Restore their positions for header
+		// windows so CSV and spreadsheet layouts obey the same contract.
+		// FieldPos identifies logical records, including quoted multiline cells.
+		nextLine := 1
+		var previousOffset int64
+		for {
+			record, readErr := reader.Read()
+			if readErr == io.EOF { break }
+			if readErr != nil { return nil, readErr }
+			startLine, _ := reader.FieldPos(0)
+			for line := nextLine; line < startLine; line++ { records = append(records, nil) }
+			records = append(records, record)
+			offset := reader.InputOffset()
+			nextLine += bytes.Count(data[previousOffset:offset], []byte{'\n'})
+			previousOffset = offset
+		}
+	} else {
+		records, err = reader.ReadAll()
+		if err != nil { return nil, err }
 	}
 	return recordsToRows(profile, records)
 }
@@ -270,6 +295,11 @@ func recordsToRows(profile *Profile, records [][]string) ([]Row, error) {
 	if len(records) <= skip {
 		return nil, fmt.Errorf("no rows after skipLeadingRows=%d", skip)
 	}
+
+	if profile.Template.HeaderLocate {
+		return recordsToRowsHeaderLocate(profile, records, skip)
+	}
+
 	headers := normalizeCells(profile.Template.SourceHeaders)
 	start := skip
 	if len(headers) == 0 {
@@ -281,8 +311,115 @@ func recordsToRows(profile *Profile, records [][]string) ([]Row, error) {
 	if err := validateHeaders(profile, headers); err != nil {
 		return nil, err
 	}
-	rows := make([]Row, 0, len(records)-start)
-	for _, record := range records[start:] {
+	return buildRowsFromRecords(profile, headers, records[start:])
+}
+
+func recordsToRowsHeaderLocate(profile *Profile, records [][]string, skip int) ([]Row, error) {
+	wanted := normalizeCells(profile.Template.SourceHeaders)
+	if len(wanted) == 0 {
+		return nil, fmt.Errorf("headerLocate requires non-empty sourceHeaders")
+	}
+	wantedSet := make(map[string]struct{}, len(wanted))
+	for _, name := range wanted {
+		if name == "" {
+			continue
+		}
+		if _, dup := wantedSet[name]; dup {
+			return nil, fmt.Errorf("sourceHeaders contains duplicate column name %q", name)
+		}
+		wantedSet[name] = struct{}{}
+	}
+	if len(wantedSet) == 0 {
+		return nil, fmt.Errorf("headerLocate requires non-empty sourceHeaders")
+	}
+
+	scanEnd := len(records)
+	if maxRows := profile.Template.HeaderScanMaxRows; maxRows > 0 {
+		if skip+maxRows < scanEnd {
+			scanEnd = skip + maxRows
+		}
+	}
+
+	type candidate struct {
+		index   int
+		headers []string
+	}
+	var candidates []candidate
+	for i := skip; i < scanEnd; i++ {
+		headers := normalizeCells(records[i])
+		if emptyRecord(headers) {
+			continue
+		}
+		if !rowContainsAllHeaders(headers, wantedSet) {
+			continue
+		}
+		// Candidate header row: duplicate column names fail closed immediately.
+		if err := rejectDuplicateHeaderNames(headers); err != nil {
+			return nil, fmt.Errorf("header row at index %d: %w", i, err)
+		}
+		candidates = append(candidates, candidate{index: i, headers: headers})
+	}
+	switch len(candidates) {
+	case 0:
+		return nil, fmt.Errorf(
+			"headerLocate: no header row containing all sourceHeaders within scan window (skipLeadingRows=%d, headerScanMaxRows=%d)",
+			skip, profile.Template.HeaderScanMaxRows,
+		)
+	case 1:
+		// ok
+	default:
+		idxs := make([]string, len(candidates))
+		for i, c := range candidates {
+			idxs[i] = fmt.Sprintf("%d", c.index)
+		}
+		return nil, fmt.Errorf(
+			"headerLocate: ambiguous header rows at indices [%s]; refine skipLeadingRows or sourceHeaders",
+			strings.Join(idxs, ", "),
+		)
+	}
+
+	found := candidates[0]
+	if err := validateHeaders(profile, found.headers); err != nil {
+		return nil, err
+	}
+	return buildRowsFromRecords(profile, found.headers, records[found.index+1:])
+}
+
+func rejectDuplicateHeaderNames(headers []string) error {
+	seen := make(map[string]struct{}, len(headers))
+	for _, h := range headers {
+		h = strings.TrimSpace(h)
+		if h == "" {
+			continue
+		}
+		if _, ok := seen[h]; ok {
+			return fmt.Errorf("duplicate column name %q", h)
+		}
+		seen[h] = struct{}{}
+	}
+	return nil
+}
+
+func rowContainsAllHeaders(headers []string, wanted map[string]struct{}) bool {
+	available := make(map[string]struct{}, len(headers))
+	for _, h := range headers {
+		h = strings.TrimSpace(h)
+		if h == "" {
+			continue
+		}
+		available[h] = struct{}{}
+	}
+	for name := range wanted {
+		if _, ok := available[name]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func buildRowsFromRecords(profile *Profile, headers []string, records [][]string) ([]Row, error) {
+	rows := make([]Row, 0, len(records))
+	for _, record := range records {
 		record = normalizeCells(record)
 		if emptyRecord(record) {
 			continue
@@ -414,14 +551,13 @@ func rowToV2Order(profile *Profile, row Row) (ir.Order, bool, error) {
 		}
 	}
 	if row.Amount != "" {
-		if amount, err := parseAmount(row.Amount, profile.Template.AmountPrefix); err == nil {
-			order.Type = inferType(row.Type, amount)
-			order.TypeOriginal = row.Type
-			if amount < 0 {
-				amount = -amount
-			}
-			order.Money = amount
+		amount, err := parseAmountExact(row.Amount, profile.Template.AmountPrefix)
+		if err != nil {
+			return ir.Order{}, false, fmt.Errorf("parse amount %q failed for date=%q payee=%q: %w", row.Amount, row.Date, row.Payee, err)
 		}
+		order.Type = inferTypeDecimal(row.Type, amount)
+		order.TypeOriginal = row.Type
+		setOrderExactMoney(&order, amount)
 	}
 	order.Peer = row.Payee
 	order.Item = row.Narration
@@ -432,6 +568,9 @@ func rowToV2Order(profile *Profile, row Row) (ir.Order, bool, error) {
 	ignore := false
 	mergedV2Actions := Actions{}
 	for _, rule := range profile.Rules() {
+		if !ruleInScope(rule, profile.ID) {
+			continue
+		}
 		matches, err := ruleMatches(rule, row, order)
 		if err != nil {
 			return ir.Order{}, false, err
@@ -439,8 +578,12 @@ func rowToV2Order(profile *Profile, row Row) (ir.Order, bool, error) {
 		if !matches {
 			continue
 		}
-		applyV2ScalarActions(&order, row, rule.Actions, &ignore, profile.Template.DateFormat)
-		mergeV2Actions(&mergedV2Actions, rule.Actions)
+		if err := applyV2ScalarActions(&order, row, rule.Actions, &ignore, profile.Template.DateFormat); err != nil {
+			return ir.Order{}, false, err
+		}
+		if err := mergeV2Actions(&mergedV2Actions, rule.Actions); err != nil {
+			return ir.Order{}, false, err
+		}
 	}
 	if ignore {
 		return order, true, nil
@@ -448,19 +591,18 @@ func rowToV2Order(profile *Profile, row Row) (ir.Order, bool, error) {
 	if order.PayTime.IsZero() {
 		return ir.Order{}, false, fmt.Errorf("runtime v2 rule did not set date")
 	}
-	renderV2Postings(&order, row, mergedV2Actions)
+	if err := renderV2Postings(&order, row, mergedV2Actions); err != nil {
+		return ir.Order{}, false, err
+	}
 	return order, false, nil
 }
 
 func rowToOrder(profile *Profile, row Row) (ir.Order, bool, error) {
-	amount, err := parseAmount(row.Amount, profile.Template.AmountPrefix)
+	amount, err := parseAmountExact(row.Amount, profile.Template.AmountPrefix)
 	if err != nil {
 		return ir.Order{}, false, fmt.Errorf("parse amount %q failed for date=%q payee=%q: %w", row.Amount, row.Date, row.Payee, err)
 	}
-	txType := inferType(row.Type, amount)
-	if amount < 0 {
-		amount = -amount
-	}
+	txType := inferTypeDecimal(row.Type, amount)
 	payTime, err := parseDate(row.Date, profile.Template.DateFormat)
 	if err != nil {
 		return ir.Order{}, false, err
@@ -469,13 +611,13 @@ func rowToOrder(profile *Profile, row Row) (ir.Order, bool, error) {
 		OrderType:    ir.OrderTypeNormal,
 		Peer:         row.Payee,
 		Item:         row.Narration,
-		Money:        amount,
 		PayTime:      payTime,
 		Type:         txType,
 		TypeOriginal: row.Type,
 		Currency:     profile.Template.DefaultCurrency,
 		Metadata:     row.Metadata,
 	}
+	setOrderExactMoney(&order, amount)
 	order.MinusAccount = profile.Template.DefaultMinus
 	order.PlusAccount = profile.Template.DefaultPlus
 	if row.Currency != "" {
@@ -487,6 +629,9 @@ func rowToOrder(profile *Profile, row Row) (ir.Order, bool, error) {
 
 	ignore := false
 	for _, rule := range profile.Rules() {
+		if !ruleInScope(rule, profile.ID) {
+			continue
+		}
 		matches, err := ruleMatches(rule, row, order)
 		if err != nil {
 			return ir.Order{}, false, err
@@ -515,12 +660,25 @@ func ruleMatches(rule Rule, row Row, order ir.Order) (bool, error) {
 	return ok, nil
 }
 
+func ruleInScope(rule Rule, profileID string) bool {
+	if rule.TemplateID == "" {
+		return true
+	}
+	return profileID != "" && rule.TemplateID == profileID
+}
+
 func applyActions(order *ir.Order, row Row, actions Actions, ignore *bool, v2 bool) error {
+	// Sticky ignore (Mirato): true latches; later false/absent never clears.
+	// Later matching rules still run (accounts/tags may change) but order is dropped.
 	if actions.Ignore {
 		*ignore = true
 	}
 	if actions.Type != "" {
-		order.Type = inferType(actions.Type, order.Money)
+		if d, ok := orderMoneyDecimal(*order); ok {
+			order.Type = inferTypeDecimal(actions.Type, d)
+		} else {
+			order.Type = inferType(actions.Type, order.Money)
+		}
 		order.TypeOriginal = actions.Type
 	}
 	if actions.Note != "" {
@@ -533,19 +691,22 @@ func applyActions(order *ir.Order, row Row, actions Actions, ignore *bool, v2 bo
 		order.Item = resolveValue(actions.Narration, row)
 	}
 	if actions.Amount != "" {
-		if amount, err := parseAmount(resolveValue(actions.Amount, row), ""); err == nil {
-			if amount < 0 {
-				amount = -amount
-			}
-			order.Money = amount
+		amount, err := parseAmountExact(resolveValue(actions.Amount, row), "")
+		if err != nil {
+			return fmt.Errorf("actions.amount %q: %w", actions.Amount, err)
 		}
+		setOrderExactMoney(order, amount)
 	}
 	if actions.Currency != "" {
 		order.Currency = resolveValue(actions.Currency, row)
 	}
 	if !actions.To.IsZero() {
 		if v2 {
-			if posting, ok := renderTransferPosting(actions.To, actions.Amount, actions.Currency, "+", row, *order); ok {
+			posting, err := renderTransferPosting(actions.To, actions.Amount, actions.Currency, "+", row, *order)
+			if err != nil {
+				return err
+			}
+			if posting != "" {
 				order.Postings = append(order.Postings, ir.Posting{Line: posting})
 			}
 		} else {
@@ -554,7 +715,11 @@ func applyActions(order *ir.Order, row Row, actions Actions, ignore *bool, v2 bo
 	}
 	if !actions.From.IsZero() {
 		if v2 {
-			if posting, ok := renderTransferPosting(actions.From, actions.Amount, actions.Currency, "-", row, *order); ok {
+			posting, err := renderTransferPosting(actions.From, actions.Amount, actions.Currency, "-", row, *order)
+			if err != nil {
+				return err
+			}
+			if posting != "" {
 				order.Postings = append(order.Postings, ir.Posting{Line: posting})
 			}
 		} else {
@@ -563,14 +728,22 @@ func applyActions(order *ir.Order, row Row, actions Actions, ignore *bool, v2 bo
 	}
 	if v2 {
 		for _, line := range actions.Postings {
-			rendered := strings.TrimSpace(renderRuleText(line, row, *order))
+			rendered, err := renderPostingTextStrict(line, row, *order)
+			if err != nil {
+				return err
+			}
+			rendered = strings.TrimSpace(rendered)
 			if rendered != "" {
 				order.Postings = append(order.Postings, ir.Posting{Line: rendered})
 			}
 		}
 	}
 	if actions.Tag != "" {
-		order.Tags = append(order.Tags, splitList(actions.Tag)...)
+		if v2 {
+			order.Tags = append(order.Tags, splitList(resolveActionValue(actions.Tag, row, *order))...)
+		} else {
+			order.Tags = append(order.Tags, splitList(actions.Tag)...)
+		}
 	}
 	order.Tags = append(order.Tags, actions.Tags...)
 	if actions.Metadata != nil {
@@ -579,7 +752,7 @@ func applyActions(order *ir.Order, row Row, actions Actions, ignore *bool, v2 bo
 		}
 		for key, value := range actions.Metadata {
 			if v2 {
-				order.Metadata[key] = renderRuleText(value, row, *order)
+				order.Metadata[key] = resolveActionValue(value, row, *order)
 			} else {
 				order.Metadata[key] = resolveValue(value, row)
 			}
@@ -588,60 +761,74 @@ func applyActions(order *ir.Order, row Row, actions Actions, ignore *bool, v2 bo
 	return nil
 }
 
-func applyV2ScalarActions(order *ir.Order, row Row, actions Actions, ignore *bool, dateFormat string) {
+func applyV2ScalarActions(order *ir.Order, row Row, actions Actions, ignore *bool, dateFormat string) error {
+	// Sticky ignore — see applyActions.
 	if actions.Ignore {
 		*ignore = true
 	}
 	if actions.Date != "" {
-		if payTime, err := parseDate(renderRuleText(actions.Date, row, *order), dateFormat); err == nil {
+		if payTime, err := parseDate(resolveActionValue(actions.Date, row, *order), dateFormat); err == nil {
 			order.PayTime = payTime
 		}
 	}
 	if actions.Amount != "" {
-		if amount, err := parseAmount(renderPostingText(actions.Amount, row, *order), ""); err == nil {
-			order.Type = inferType(order.TypeOriginal, amount)
-			if amount < 0 {
-				amount = -amount
-			}
-			order.Money = amount
+		rendered, err := renderPostingTextStrict(actions.Amount, row, *order)
+		if err != nil {
+			return fmt.Errorf("actions.amount %q: %w", actions.Amount, err)
 		}
+		amount, err := parseAmountExact(rendered, "")
+		if err != nil {
+			return fmt.Errorf("actions.amount %q => %q: %w", actions.Amount, rendered, err)
+		}
+		order.Type = inferTypeDecimal(order.TypeOriginal, amount)
+		setOrderExactMoney(order, amount)
 	}
 	if actions.Type != "" {
-		order.TypeOriginal = renderRuleText(actions.Type, row, *order)
-		order.Type = inferType(order.TypeOriginal, order.Money)
+		order.TypeOriginal = resolveActionValue(actions.Type, row, *order)
+		if d, ok := orderMoneyDecimal(*order); ok {
+			order.Type = inferTypeDecimal(order.TypeOriginal, d)
+		} else {
+			order.Type = inferType(order.TypeOriginal, order.Money)
+		}
 	}
 	if actions.Note != "" {
-		order.Note = renderRuleText(actions.Note, row, *order)
+		order.Note = resolveActionValue(actions.Note, row, *order)
 	}
 	if actions.Payee != "" {
-		order.Peer = renderRuleText(actions.Payee, row, *order)
+		order.Peer = resolveActionValue(actions.Payee, row, *order)
 	}
 	if actions.Narration != "" {
-		order.Item = renderRuleText(actions.Narration, row, *order)
+		order.Item = resolveActionValue(actions.Narration, row, *order)
 	}
 	if actions.Currency != "" {
-		order.Currency = renderRuleText(actions.Currency, row, *order)
+		order.Currency = resolveActionValue(actions.Currency, row, *order)
 	}
 	if actions.Tag != "" {
-		order.Tags = append(order.Tags, splitList(actions.Tag)...)
+		order.Tags = append(order.Tags, splitList(resolveActionValue(actions.Tag, row, *order))...)
 	}
 	order.Tags = append(order.Tags, actions.Tags...)
+	if actions.Flag != "" {
+		order.Flag = strings.TrimSpace(resolveActionValue(actions.Flag, row, *order))
+	}
+	if actions.Link != "" {
+		link := strings.TrimSpace(resolveActionValue(actions.Link, row, *order))
+		if link != "" {
+			order.Links = append(order.Links, link)
+		}
+	}
 	if actions.Metadata != nil {
 		if order.Metadata == nil {
 			order.Metadata = map[string]string{}
 		}
 		for key, value := range actions.Metadata {
-			rendered := renderRuleText(value, row, *order)
-			if rendered == "" {
-				delete(order.Metadata, key)
-				continue
-			}
-			order.Metadata[key] = rendered
+			// Mirato retains empty metadata values; do not delete on "".
+			order.Metadata[key] = resolveActionValue(value, row, *order)
 		}
 	}
+	return nil
 }
 
-func mergeV2Actions(base *Actions, next Actions) {
+func mergeV2Actions(base *Actions, next Actions) error {
 	if !next.From.IsZero() {
 		base.From = mergeTransferSide(base.From, next.From)
 	}
@@ -662,7 +849,25 @@ func mergeV2Actions(base *Actions, next Actions) {
 			base.Vars[key] = value
 		}
 	}
-	base.Postings = append(base.Postings, next.Postings...)
+	// Empty replace must clear the complete set (Mirato semantics). Do not
+	// require len(Postings)>0 — that silently ignored replace: [].
+	modeRaw := strings.TrimSpace(next.PostingsMode)
+	if len(next.Postings) > 0 || modeRaw != "" {
+		mode, err := normalizePostingsMode(next.PostingsMode)
+		if err != nil {
+			return err
+		}
+		if mode == "replace" {
+			base.Postings = append([]string(nil), next.Postings...)
+			base.PostingsMode = "replace"
+		} else if len(next.Postings) > 0 {
+			base.Postings = append(base.Postings, next.Postings...)
+			if base.PostingsMode == "" {
+				base.PostingsMode = "append"
+			}
+		}
+	}
+	return nil
 }
 
 func mergeTransferSide(base, next TransferSide) TransferSide {
@@ -678,24 +883,47 @@ func mergeTransferSide(base, next TransferSide) TransferSide {
 	return base
 }
 
-func renderV2Postings(order *ir.Order, row Row, actions Actions) {
+func renderV2Postings(order *ir.Order, row Row, actions Actions) error {
 	row = rowWithVars(row, actions.Vars, *order)
-	if !actions.To.IsZero() {
-		if posting, ok := renderTransferPosting(actions.To, actions.Amount, actions.Currency, "+", row, *order); ok {
-			order.Postings = append(order.Postings, ir.Posting{Line: posting})
-		}
+	mode, err := normalizePostingsMode(actions.PostingsMode)
+	if err != nil {
+		return err
 	}
-	if !actions.From.IsZero() {
-		if posting, ok := renderTransferPosting(actions.From, actions.Amount, actions.Currency, "-", row, *order); ok {
-			order.Postings = append(order.Postings, ir.Posting{Line: posting})
+	// replace (even empty): Mirato complete leg list — do not also render
+	// automatic from/to (empty replace clears legs; non-empty replaces them).
+	skipAutoLegs := mode == "replace"
+	ccyFallback := firstNonEmptyString(actions.Currency, order.Currency)
+	if !skipAutoLegs {
+		if !actions.To.IsZero() {
+			posting, err := renderTransferPosting(actions.To, actions.Amount, ccyFallback, "+", row, *order)
+			if err != nil {
+				return err
+			}
+			if posting != "" {
+				order.Postings = append(order.Postings, ir.Posting{Line: posting})
+			}
+		}
+		if !actions.From.IsZero() {
+			posting, err := renderTransferPosting(actions.From, actions.Amount, ccyFallback, "-", row, *order)
+			if err != nil {
+				return err
+			}
+			if posting != "" {
+				order.Postings = append(order.Postings, ir.Posting{Line: posting})
+			}
 		}
 	}
 	for _, line := range actions.Postings {
-		rendered := strings.TrimSpace(renderPostingText(line, row, *order))
+		rendered, err := renderPostingTextStrict(line, row, *order)
+		if err != nil {
+			return err
+		}
+		rendered = strings.TrimSpace(rendered)
 		if rendered != "" {
 			order.Postings = append(order.Postings, ir.Posting{Line: rendered})
 		}
 	}
+	return nil
 }
 
 func rowWithVars(row Row, vars map[string]string, order ir.Order) Row {
@@ -714,10 +942,10 @@ func rowWithVars(row Row, vars map[string]string, order ir.Order) Row {
 	return withVars
 }
 
-func renderTransferPosting(side TransferSide, defaultAmount, defaultCurrency, direction string, row Row, order ir.Order) (string, bool) {
-	account := strings.TrimSpace(renderRuleText(side.Account, row, order))
+func renderTransferPosting(side TransferSide, defaultAmount, defaultCurrency, direction string, row Row, order ir.Order) (string, error) {
+	account := strings.TrimSpace(resolveActionValue(side.Account, row, order))
 	if account == "" {
-		return "", false
+		return "", nil
 	}
 	amount := firstNonEmptyString(side.Amount, defaultAmount)
 	currency := firstNonEmptyString(side.Currency, defaultCurrency)
@@ -725,11 +953,18 @@ func renderTransferPosting(side TransferSide, defaultAmount, defaultCurrency, di
 		amount = "[amount].number"
 	}
 	amount = forceAmountDirection(amount, direction)
-	parts := []string{account, renderPostingText(amount, row, order)}
-	if currency != "" {
-		parts = append(parts, renderRuleText(currency, row, order))
+	renderedAmount, err := renderPostingTextStrict(amount, row, order)
+	if err != nil {
+		return "", fmt.Errorf("transfer amount %q: %w", amount, err)
 	}
-	return strings.Join(nonEmptyStrings(parts), " "), true
+	if _, err := parseAmountExact(renderedAmount, ""); err != nil {
+		return "", fmt.Errorf("transfer amount %q => %q: %w", amount, renderedAmount, err)
+	}
+	parts := []string{account, renderedAmount}
+	if currency != "" {
+		parts = append(parts, resolveActionValue(currency, row, order))
+	}
+	return strings.Join(nonEmptyStrings(parts), " "), nil
 }
 
 func forceAmountDirection(expr, direction string) string {
@@ -772,10 +1007,31 @@ func nonEmptyStrings(values []string) []string {
 	return out
 }
 
+// columnLookupMode distinguishes Mirato shared protocols so one <col> helper
+// cannot silently mix condition logical fallback with action raw-only refs.
+type columnLookupMode int
+
+const (
+	lookupCondition columnLookupMode = iota
+	lookupActionRaw
+)
+
+// fieldValue is the shared condition lookup (Mirato baseline). Prefer
+// conditionFieldValue / actionColumnValue at call sites that know the context.
 func fieldValue(field string, row Row, order ir.Order) string {
+	return conditionFieldValue(field, row, order)
+}
+
+// conditionFieldValue implements Mirato↔DEG shared condition lookup:
+//  1. exact Raw key wins (including present empty string);
+//  2. else exact lowercase logical payee|narration|amount|date|currency;
+//  3. else "" — custom columns keep literal identity (no raw./metadata.
+//     namespace strip, no case fold, no peer/item aliases).
+// date.time / date.date / date.timestamp suffixes remain for DEG native when.
+func conditionFieldValue(field string, row Row, order ir.Order) string {
 	field = strings.TrimSpace(field)
 	if base, suffix, ok := strings.Cut(field, "."); ok && (suffix == "time" || suffix == "date" || suffix == "timestamp") {
-		value := fieldValue(base, row, order)
+		value := conditionFieldValue(base, row, order)
 		if base == "date" || base == "交易时间" || value == "" {
 			if suffix == "time" {
 				return order.PayTime.Format("15:04")
@@ -795,46 +1051,84 @@ func fieldValue(field string, row Row, order ir.Order) string {
 			return t.Format("2006-01-02")
 		}
 	}
-	switch strings.ToLower(field) {
+	if v, ok := row.Raw[field]; ok {
+		return v
+	}
+	switch field {
+	// 不可变原始值：`original_*` / `imported_*` 永远读账单原始行，不受前面规则改写影响。
+	// 顺序语义（本批确认：规则按序执行、后面的条件看到前面的改写）下，作者要用原始值
+	// 匹配就必须有显式入口 —— 与 Actual Budget 的 `imported payee` 同一套思路。
+	case "original_amount", "imported_amount":
+		return row.Amount
+	case "original_payee", "imported_payee":
+		return row.Payee
+	case "original_narration", "imported_narration":
+		return row.Narration
+	case "original_date", "imported_date":
+		return row.Date
+	case "original_currency", "imported_currency":
+		return row.Currency
+	case "original_type", "imported_type":
+		return row.Type
 	case "date":
+		if !order.PayTime.IsZero() {
+			return order.PayTime.Format("2006-01-02")
+		}
 		return row.Date
 	case "amount":
+		if order.ExactMoney != nil {
+			return order.ExactMoney.Text(0)
+		}
 		return row.Amount
 	case "currency":
+		if order.Currency != "" {
+			return order.Currency
+		}
 		return row.Currency
-	case "payee", "peer":
+	case "payee":
+		if order.Peer != "" {
+			return order.Peer
+		}
 		return row.Payee
-	case "narration", "item":
+	case "narration":
+		if order.Item != "" {
+			return order.Item
+		}
 		return row.Narration
-	case "type":
-		return row.Type
-	case "minusaccount", "minus_account":
-		return order.MinusAccount
-	case "plusaccount", "plus_account":
-		return order.PlusAccount
 	default:
-		if strings.HasPrefix(field, "metadata.") {
-			return row.Metadata[strings.TrimPrefix(field, "metadata.")]
+		if order.Metadata != nil {
+			if v, ok := order.Metadata[field]; ok {
+				return v
+			}
+			if v, ok := order.Metadata["metadata."+field]; ok {
+				return v
+			}
 		}
-		if strings.HasPrefix(field, "raw.") {
-			return row.Raw[strings.TrimPrefix(field, "raw.")]
-		}
-		return row.Raw[field]
+		return ""
 	}
 }
 
+// actionColumnValue implements Mirato __from_column / __regex / __replace:
+// column refs resolve against Raw only. Present empty stays empty; absent → "".
+// Never falls back to logical Row/Order fields (that is condition-only).
+func actionColumnValue(field string, row Row) string {
+	field = strings.TrimSpace(field)
+	if v, ok := row.Raw[field]; ok {
+		return v
+	}
+	return ""
+}
+
 func parseAmount(value, prefix string) (float64, error) {
-	value = strings.TrimSpace(value)
-	value = strings.TrimPrefix(value, strings.TrimSpace(prefix))
-	replacer := strings.NewReplacer(",", "", "¥", "", "￥", "", "$", "", "CNY", "", "RMB", "")
-	value = strings.TrimSpace(replacer.Replace(value))
-	if base, _, ok := strings.Cut(value, "("); ok {
-		value = strings.TrimSpace(base)
+	d, err := ParseAmountDecimal(value, prefix)
+	if err != nil {
+		return 0, err
 	}
-	if base, _, ok := strings.Cut(value, "（"); ok {
-		value = strings.TrimSpace(base)
-	}
-	return strconv.ParseFloat(value, 64)
+	return d.Float64Approx(), nil
+}
+
+func parseAmountExact(value, prefix string) (ir.Decimal, error) {
+	return ParseAmountDecimal(value, prefix)
 }
 
 func parseDate(value, layout string) (time.Time, error) {
@@ -876,6 +1170,20 @@ func inferType(value string, amount float64) ir.Type {
 		return ir.TypeSend
 	}
 	if amount < 0 {
+		return ir.TypeSend
+	}
+	return ir.TypeSend
+}
+
+func inferTypeDecimal(value string, amount ir.Decimal) ir.Type {
+	value = strings.ToLower(strings.TrimSpace(value))
+	switch value {
+	case "recv", "income", "in", "收入", "收", "入账":
+		return ir.TypeRecv
+	case "send", "expense", "out", "支出", "支", "出账":
+		return ir.TypeSend
+	}
+	if amount.Sign() < 0 {
 		return ir.TypeSend
 	}
 	return ir.TypeSend
@@ -973,20 +1281,139 @@ func splitList(value string) []string {
 	return out
 }
 
-var columnExprPattern = regexp.MustCompile(`(?:\[([^\]]+)\]|<([^>]+)>)((?:\.(?:extract|format)\((?:r)?"[^"]*"\)|\.(?:extract|format)\((?:r)?'[^']*'\)|\.[A-Za-z0-9_]+|\.[+\-!])*)`)
+var columnExprPattern = regexp.MustCompile(`(?:\[([^\]]+)\]|<([^>]+)>)((?:\.(?:extract|format)\((?:r)?"[^"]*"\)|\.(?:extract|format)\((?:r)?'[^']*'\)|\.replace\((?:r)?"[^"]*",(?:r)?"[^"]*"\)|\.replace\((?:r)?'[^']*',(?:r)?'[^']*'\)|\.[A-Za-z0-9_]+|\.[+\-!])*)`)
+
+// resolveActionValue implements the Mirato↔DEG action literal/ref protocol:
+//   - fully quoted "..." / '...' => string literal (escapes: \\ \" \' \n \r \t)
+//   - otherwise interpolate <col> / [col] refs (and methods) via renderRuleText
+// Fixed text such as "<金额>", "payee", or "1+2" must be quoted so it is not
+// treated as a column ref or arithmetic expression.
+func resolveActionValue(value string, row Row, order ir.Order) string {
+	if lit, ok := parseActionLiteral(value); ok {
+		return lit
+	}
+	return renderRuleText(value, row, order)
+}
+
+func renderRuleTextMode(value string, row Row, order ir.Order, mode columnLookupMode) string {
+	return columnExprPattern.ReplaceAllStringFunc(value, func(match string) string {
+		return evalColumnString(match, row, order, mode)
+	})
+}
+
+func parseActionLiteral(value string) (string, bool) {
+	if len(value) < 2 {
+		return "", false
+	}
+	quote := value[0]
+	if quote != '"' && quote != '\'' {
+		return "", false
+	}
+	if value[len(value)-1] != quote {
+		return "", false
+	}
+	var b strings.Builder
+	escaped := false
+	for i := 1; i < len(value)-1; i++ {
+		c := value[i]
+		if escaped {
+			switch c {
+			case 'n':
+				b.WriteByte('\n')
+			case 'r':
+				b.WriteByte('\r')
+			case 't':
+				b.WriteByte('\t')
+			case '\\', '"', '\'':
+				b.WriteByte(c)
+			default:
+				b.WriteByte('\\')
+				b.WriteByte(c)
+			}
+			escaped = false
+			continue
+		}
+		if c == '\\' {
+			escaped = true
+			continue
+		}
+		if c == quote {
+			// Unescaped closing quote before the end => not a single literal.
+			return "", false
+		}
+		b.WriteByte(c)
+	}
+	if escaped {
+		b.WriteByte('\\')
+	}
+	return b.String(), true
+}
 
 func renderRuleText(value string, row Row, order ir.Order) string {
+	// Explicit protocol by delimiter (do not unify into one lookup):
+	//   <col>  → Mirato __from_column/__regex/__replace family: Raw only
+	//   [col]  → DEG-native refs (e.g. [amount].number on transfer legs):
+	//            shared condition lookup (raw then five logicals)
 	return columnExprPattern.ReplaceAllStringFunc(value, func(match string) string {
-		return evalColumnString(match, row, order)
+		mode := lookupActionRaw
+		if strings.HasPrefix(match, "[") {
+			mode = lookupCondition
+		}
+		return evalColumnString(match, row, order, mode)
 	})
 }
 
 func renderPostingText(value string, row Row, order ir.Order) string {
-	rendered := renderRuleText(value, row, order)
-	return evalSimpleArithmetic(rendered)
+	out, err := renderPostingTextStrict(value, row, order)
+	if err != nil {
+		// Soft legacy path for non-money call sites (metadata/note): leave text unchanged.
+		if lit, ok := parseActionLiteral(value); ok {
+			return lit
+		}
+		return evalSimpleArithmetic(renderRuleText(value, row, order))
+	}
+	return out
 }
 
-func evalColumnString(expr string, row Row, order ir.Order) string {
+func renderPostingTextStrict(value string, row Row, order ir.Order) (string, error) {
+	if lit, ok := parseActionLiteral(value); ok {
+		// Quoted literals skip interpolation/arithmetic but still validate money.
+		if err := validatePostingAmountTokens(lit); err != nil {
+			return "", err
+		}
+		return lit, nil
+	}
+	rendered := renderRuleText(value, row, order)
+	// An account is an identifier, not an arithmetic region. Numeric and
+	// hyphenated account segments must survive posting evaluation unchanged.
+	// Account-only postings (elided amount) must never be rewritten.
+	prefix := ""
+	trimmed := strings.TrimLeftFunc(rendered, unicode.IsSpace)
+	leadingWS := rendered[:len(rendered)-len(trimmed)]
+	if end := strings.IndexFunc(trimmed, unicode.IsSpace); end < 0 {
+		if strings.Contains(trimmed, ":") {
+			out := leadingWS + trimmed
+			if err := validatePostingAmountTokens(out); err != nil {
+				return "", err
+			}
+			return out, nil
+		}
+	} else if strings.Contains(trimmed[:end], ":") {
+		prefix = leadingWS + trimmed[:end]
+		rendered = trimmed[end:]
+	}
+	out, err := evalArithmeticInTextStrict(rendered)
+	if err != nil {
+		return "", err
+	}
+	out = prefix + out
+	if err := validatePostingAmountTokens(out); err != nil {
+		return "", err
+	}
+	return out, nil
+}
+
+func evalColumnString(expr string, row Row, order ir.Order, mode columnLookupMode) string {
 	if !strings.HasPrefix(expr, "[") && !strings.HasPrefix(expr, "<") {
 		return expr
 	}
@@ -999,7 +1426,13 @@ func evalColumnString(expr string, row Row, order ir.Order) string {
 		return expr
 	}
 	field := expr[1:end]
-	value := row.Raw[field]
+	var value string
+	switch mode {
+	case lookupActionRaw:
+		value = actionColumnValue(field, row)
+	default:
+		value = conditionFieldValue(field, row, order)
+	}
 	rest := expr[end+1:]
 	for rest != "" {
 		if !strings.HasPrefix(rest, ".") {
@@ -1014,14 +1447,16 @@ func evalColumnString(expr string, row Row, order ir.Order) string {
 }
 
 func nextMethod(rest string) (string, string, string) {
-	if strings.HasPrefix(rest, "extract(") || strings.HasPrefix(rest, "format(") {
+	if strings.HasPrefix(rest, "extract(") || strings.HasPrefix(rest, "format(") || strings.HasPrefix(rest, "replace(") {
 		name, _, _ := strings.Cut(rest, "(")
 		end := closingMethodParen(rest)
 		if end < 0 {
 			return rest, "", ""
 		}
 		arg := rest[len(name)+1 : end]
-		arg = strings.Trim(arg, `"'`)
+		if name != "replace" {
+			arg = strings.Trim(arg, `"'`)
+		}
 		return name, arg, rest[end+1:]
 	}
 	if rest != "" && (rest[0] == '+' || rest[0] == '-' || rest[0] == '!') {
@@ -1074,23 +1509,23 @@ func applyColumnMethod(value, method, arg string, row Row, order ir.Order) strin
 	case "number":
 		return normalizeAmountString(value)
 	case "+":
-		n, err := parseAmount(value, "")
+		n, err := parseAmountExact(value, "")
 		if err != nil {
 			return value
 		}
-		return formatAmountLike(math.Abs(n), value)
+		return formatAmountLikeDecimal(n.Abs(), value)
 	case "-":
-		n, err := parseAmount(value, "")
+		n, err := parseAmountExact(value, "")
 		if err != nil {
 			return value
 		}
-		return formatAmountLike(-math.Abs(n), value)
+		return formatAmountLikeDecimal(n.Abs().Neg(), value)
 	case "!":
-		n, err := parseAmount(value, "")
+		n, err := parseAmountExact(value, "")
 		if err != nil {
 			return value
 		}
-		return formatAmountLike(-n, value)
+		return formatAmountLikeDecimal(n.Neg(), value)
 	case "format":
 		return formatValue(value, arg)
 	case "date", "time", "timestamp":
@@ -1120,33 +1555,103 @@ func applyColumnMethod(value, method, arg string, row Row, order ir.Order) strin
 			return matches[0]
 		}
 		return ""
+	case "replace":
+		from, to, ok := splitReplaceArgs(arg)
+		if !ok {
+			return value
+		}
+		return strings.ReplaceAll(value, from, to)
 	}
 	return value
+}
+
+func splitReplaceArgs(arg string) (string, string, bool) {
+	arg = strings.TrimSpace(arg)
+	parts := []string{}
+	var quote byte
+	var b strings.Builder
+	started := false
+	for i := 0; i < len(arg); i++ {
+		c := arg[i]
+		if quote != 0 {
+			if c == '\\' && i+1 < len(arg) {
+				b.WriteByte(arg[i+1])
+				i++
+				continue
+			}
+			if c == quote {
+				parts = append(parts, b.String())
+				b.Reset()
+				quote = 0
+				started = false
+				continue
+			}
+			b.WriteByte(c)
+			continue
+		}
+		if c == '"' || c == '\'' {
+			quote = c
+			started = true
+			continue
+		}
+		if c == ',' || c == ' ' || c == '\t' {
+			continue
+		}
+		if !started {
+			return "", "", false
+		}
+	}
+	if len(parts) != 2 {
+		return "", "", false
+	}
+	return parts[0], parts[1], true
 }
 
 func normalizeAmountString(value string) string {
-	value = strings.TrimSpace(value)
-	replacer := strings.NewReplacer(",", "", "¥", "", "￥", "", "$", "", "CNY", "", "RMB", "")
-	value = strings.TrimSpace(replacer.Replace(value))
-	if base, _, ok := strings.Cut(value, "("); ok {
-		value = strings.TrimSpace(base)
-	}
-	if base, _, ok := strings.Cut(value, "（"); ok {
-		value = strings.TrimSpace(base)
-	}
-	return value
+	cleaned := CleanAmount(value)
+	// Only strip clearly non-numeric trailing notes (e.g. "12.00 (备注)").
+	// Arithmetic-looking parentheses such as "1(2+3)" / "12（+3）" are kept so
+	// later strict parsing rejects them instead of silently truncating.
+	cleaned, _ = splitTrailingNonNumericAnnotation(cleaned)
+	return cleaned
 }
 
 func formatAmountLike(amount float64, original string) string {
-	precision := 2
+	// Legacy helper retained for float call sites; prefer formatAmountLikeDecimal.
+	d, err := ir.ParseDecimal(strconv.FormatFloat(amount, 'f', -1, 64))
+	if err != nil {
+		precision := 2
+		cleaned := normalizeAmountString(original)
+		if dot := strings.LastIndex(cleaned, "."); dot >= 0 {
+			precision = len(cleaned) - dot - 1
+		}
+		if precision < 2 {
+			precision = 2
+		}
+		return strconv.FormatFloat(amount, 'f', precision, 64)
+	}
+	return formatAmountLikeDecimal(d, original)
+}
+
+func formatAmountLikeDecimal(amount ir.Decimal, original string) string {
+	minScale := uint32(2)
 	cleaned := normalizeAmountString(original)
 	if dot := strings.LastIndex(cleaned, "."); dot >= 0 {
-		precision = len(cleaned) - dot - 1
+		frac := cleaned[dot+1:]
+		if e := strings.IndexAny(frac, "eE"); e >= 0 {
+			frac = frac[:e]
+		}
+		if uint32(len(frac)) > minScale {
+			minScale = uint32(len(frac))
+		}
 	}
-	if precision < 2 {
-		precision = 2
+	text0 := amount.Text(0)
+	if dot := strings.LastIndex(text0, "."); dot >= 0 {
+		if uint32(len(text0)-dot-1) > minScale {
+			minScale = uint32(len(text0) - dot - 1)
+		}
 	}
-	return strconv.FormatFloat(amount, 'f', precision, 64)
+	return amount.Text(minScale)
 }
 
 func formatValue(value, pattern string) string {
@@ -1156,57 +1661,185 @@ func formatValue(value, pattern string) string {
 		return value
 	}
 	if strings.ContainsAny(pattern, "fFeEgG") {
-		n, err := parseAmount(value, "")
+		d, err := ParseAmountDecimal(value, "")
 		if err != nil {
 			return value
 		}
-		return fmt.Sprintf(pattern, n)
+		out, ok := formatDecimalPrintfExact(d, pattern)
+		if !ok {
+			// Unsupported / lossy float formats: return unchanged rather than
+			// silently wrong float64 output.
+			return value
+		}
+		return out
 	}
 	return fmt.Sprintf(pattern, strings.TrimSpace(value))
 }
 
-var simpleArithmeticPattern = regexp.MustCompile(`(-?\d+(?:\.\d+)?)\s*([*/+-])\s*(-?\d+(?:\.\d+)?)`)
+// formatDecimalPrintfExact formats d with a single %[.N]f verb, preserving
+// literal prefix/suffix (e.g. "-%.2f" → "-12.34"). No float64 path.
+func formatDecimalPrintfExact(d ir.Decimal, pattern string) (string, bool) {
+	if strings.ContainsAny(pattern, "eEgG") {
+		return "", false
+	}
+	percent, ok := indexSinglePrintfVerb(pattern)
+	if !ok {
+		return "", false
+	}
+	prefix := pattern[:percent]
+	rest := pattern[percent+1:]
+	prec := 6 // fmt default for %f
+	if strings.HasPrefix(rest, ".") {
+		rest = rest[1:]
+		n := 0
+		i := 0
+		for i < len(rest) && rest[i] >= '0' && rest[i] <= '9' {
+			n = n*10 + int(rest[i]-'0')
+			i++
+		}
+		if i == 0 {
+			return "", false
+		}
+		prec = n
+		rest = rest[i:]
+	}
+	if rest == "" || (rest[0] != 'f' && rest[0] != 'F') {
+		return "", false
+	}
+	suffix := rest[1:]
+	// Reject remaining % verbs / flags / width that we do not implement exactly.
+	if strings.ContainsRune(suffix, '%') || strings.ContainsAny(prefix, "eEgG") {
+		return "", false
+	}
+	frac := fractionalDigits(d)
+	if frac > prec {
+		return "", false
+	}
+	return prefix + d.Text(uint32(prec)) + suffix, true
+}
+
+func printfFloatPrecision(pattern string) (int, bool) {
+	// Supports literal%[.]Nf literal (e.g. "-%.2f") without float64.
+	if !strings.ContainsAny(pattern, "fF") || strings.ContainsAny(pattern, "eEgG") {
+		return 0, false
+	}
+	percent, ok := indexSinglePrintfVerb(pattern)
+	if !ok {
+		return 0, false
+	}
+	rest := pattern[percent+1:]
+	prec := 6
+	if strings.HasPrefix(rest, ".") {
+		rest = rest[1:]
+		n, i := 0, 0
+		for i < len(rest) && rest[i] >= '0' && rest[i] <= '9' {
+			n = n*10 + int(rest[i]-'0')
+			i++
+		}
+		if i == 0 {
+			return 0, false
+		}
+		prec = n
+		rest = rest[i:]
+	}
+	if rest == "" || (rest[0] != 'f' && rest[0] != 'F') {
+		return 0, false
+	}
+	return prec, true
+}
+
+// indexSinglePrintfVerb finds the sole unescaped % in pattern.
+func indexSinglePrintfVerb(pattern string) (int, bool) {
+	idx := -1
+	for i := 0; i < len(pattern); i++ {
+		if pattern[i] != '%' {
+			continue
+		}
+		if i+1 < len(pattern) && pattern[i+1] == '%' {
+			i++
+			continue
+		}
+		if idx >= 0 {
+			return 0, false
+		}
+		idx = i
+	}
+	if idx < 0 {
+		return 0, false
+	}
+	return idx, true
+}
+
+func fractionalDigits(d ir.Decimal) int {
+	text := d.Text(0)
+	if dot := strings.LastIndex(text, "."); dot >= 0 {
+		return len(text) - dot - 1
+	}
+	return 0
+}
 
 func evalSimpleArithmetic(value string) string {
-	for {
-		loc := simpleArithmeticPattern.FindStringSubmatchIndex(value)
-		if loc == nil {
-			return value
-		}
-		match := value[loc[0]:loc[1]]
-		parts := simpleArithmeticPattern.FindStringSubmatch(match)
-		if len(parts) != 4 {
-			return value
-		}
-		left, err1 := strconv.ParseFloat(parts[1], 64)
-		right, err2 := strconv.ParseFloat(parts[3], 64)
-		if err1 != nil || err2 != nil {
-			return value
-		}
-		var out float64
-		switch parts[2] {
-		case "*":
-			out = left * right
-		case "/":
-			if right == 0 {
-				return value
-			}
-			out = left / right
-		case "+":
-			out = left + right
-		case "-":
-			out = left - right
-		}
-		precision := max(decimalPlaces(parts[1]), decimalPlaces(parts[3]))
-		if parts[2] == "*" {
-			precision = decimalPlaces(parts[1]) + decimalPlaces(parts[3])
-		}
-		if precision < 2 {
-			precision = 2
-		}
-		value = value[:loc[0]] + trimFraction(strconv.FormatFloat(out, 'f', precision, 64), 2) + value[loc[1]:]
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return value
 	}
+	// Only rewrite pure arithmetic / signed numerics; leave account lines alone.
+	if !looksLikeArithmetic(trimmed) && !isPlainNumberToken(trimmed) {
+		out, err := evalArithmeticInTextStrict(trimmed)
+		if err != nil {
+			return value
+		}
+		return out
+	}
+	out, err := evalArithmeticExpression(trimmed)
+	if err != nil {
+		// Soft helper: leave expression unchanged on failure (runtime paths use strict).
+		return value
+	}
+	return formatAmountLikeDecimal(out, trimmed)
 }
+
+func isPlainNumberToken(value string) bool {
+	_, err := ir.ParseDecimal(CleanAmount(value))
+	return err == nil && !strings.ContainsAny(value, "*/+") && !strings.Contains(value, "--")
+}
+
+// evalArithmeticInTextStrict evaluates embedded arithmetic with standard precedence.
+func evalArithmeticInTextStrict(value string) (string, error) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return value, nil
+	}
+	if looksLikeArithmetic(trimmed) || isPlainNumberToken(trimmed) {
+		if containsBinaryArithmetic(trimmed) || strings.ContainsAny(trimmed, "()") {
+			out, err := evalArithmeticExpression(trimmed)
+			if err != nil {
+				return "", err
+			}
+			return formatAmountLikeDecimal(out, trimmed), nil
+		}
+		if looksLikeArithmetic(trimmed) && (strings.HasPrefix(trimmed, "-") || strings.HasPrefix(trimmed, "+")) {
+			out, err := evalArithmeticExpression(trimmed)
+			if err != nil {
+				return "", err
+			}
+			return formatAmountLikeDecimal(out, trimmed), nil
+		}
+	}
+	return rewriteArithmeticRegionsStrict(value)
+}
+
+// evalEmbeddedArithmetic is the soft leftmost-compatible wrapper retained for
+// legacy call sites; new money paths must use evalArithmeticInTextStrict.
+func evalEmbeddedArithmetic(value string) string {
+	out, err := evalArithmeticInTextStrict(value)
+	if err != nil {
+		return value
+	}
+	return out
+}
+
+var simpleArithmeticPattern = regexp.MustCompile(`(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\s*([*/+-])\s*(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)`)
 
 func trimFraction(value string, minPrecision int) string {
 	dot := strings.LastIndex(value, ".")

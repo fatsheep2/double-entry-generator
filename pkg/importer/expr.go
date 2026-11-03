@@ -218,7 +218,8 @@ func scanMethodTail(expr string, i int) int {
 }
 
 func matchOperator(s string) (string, bool) {
-	for _, op := range []string{"&&", "||", "==", "!=", ">=", "<=", "!~", "~", ">", "<"} {
+	// Longer operators first so "=~" / "^=" / "$=" are not split.
+	for _, op := range []string{"&&", "||", "==", "!=", ">=", "<=", "!~", "=~", "^=", "$=", "~", ">", "<"} {
 		if strings.HasPrefix(s, op) {
 			return op, true
 		}
@@ -293,7 +294,56 @@ func (p *exprParser) parseComparison() (bool, error) {
 	}
 	leftVal := p.valueOf(left)
 	rightVal := p.valueOf(right)
+	// Legacy DEG profiles allow bare RHS literals (e.g. <收/支> == 收入).
+	// Missing LHS fields still resolve to empty; explicit RHS references never
+	// fall back to their spelling. Exported Mirato literals are always quoted.
+	if right.typ == exprTokenValue && rightVal == "" &&
+		!strings.HasPrefix(right.val, "<") && !strings.HasPrefix(right.val, "[") &&
+		!strings.HasPrefix(right.val, "raw[") {
+		if _, present := p.row.Raw[right.val]; !present {
+			switch strings.ToLower(right.val) {
+			case "date", "amount", "currency", "payee", "narration", "type", "method":
+			default:
+				rightVal = right.val
+			}
+		}
+	}
+	// 金额字段的 == / != 走数值比较。Decimal 的 Abs()/Normalize() 会丢尾随零
+	// （99.00 规范化成 "99"），纯字符串比较会让 `amount == "99.00"` 静默失效；
+	// 而 >= / <= / > / < 一直是数值比较，== 应与它们一致。
+	if isMoneyFieldToken(left) && (op.val == "==" || op.val == "!=") {
+		if l, lErr := ParseAmountDecimal(leftVal, ""); lErr == nil {
+			if r, rErr := ParseAmountDecimal(rightVal, ""); rErr == nil {
+				equal := l.Cmp(r) == 0
+				if op.val == "!=" {
+					equal = !equal
+				}
+				return equal, nil
+			}
+		}
+	}
 	return compareValues(leftVal, op.val, rightVal)
+}
+
+// isMoneyFieldToken reports whether a condition's left side is a money field,
+// in any spelling the engine accepts: `amount`, `<amount>`, `raw[amount]`,
+// plus the immutable `original_amount` / `imported_amount` aliases.
+func isMoneyFieldToken(token exprToken) bool {
+	if token.typ != exprTokenValue {
+		return false
+	}
+	name := strings.TrimSpace(token.val)
+	if i := strings.Index(name, "]"); strings.HasPrefix(name, "raw[") && i > 0 {
+		name = name[len("raw["):i]
+	} else if i := strings.Index(name, "."); i > 0 {
+		name = name[:i]
+	}
+	name = strings.TrimPrefix(strings.TrimSuffix(name, ">"), "<")
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "amount", "original_amount", "imported_amount":
+		return true
+	}
+	return false
 }
 
 func (p *exprParser) valueOf(token exprToken) string {
@@ -320,22 +370,17 @@ func (p *exprParser) valueOf(token exprToken) string {
 		return value
 	}
 	if strings.HasPrefix(token.val, "[") {
-		return evalColumnString(token.val, p.row, p.order)
+		// Conditions use shared Mirato field lookup (raw then five logicals).
+		return evalColumnString(token.val, p.row, p.order, lookupCondition)
 	}
 	if strings.HasPrefix(token.val, "<") {
-		return evalColumnString(token.val, p.row, p.order)
+		return evalColumnString(token.val, p.row, p.order, lookupCondition)
 	}
-	value := fieldValue(token.val, p.row, p.order)
-	if value == "" && !rowHasRawField(p.row, token.val) {
-		return token.val
-	}
-	return value
+	// Mirato baseline: missing/empty fields evaluate to "" — never the field
+	// name literal. Bare identifiers are always field lookups after tokenize.
+	return conditionFieldValue(token.val, p.row, p.order)
 }
 
-func rowHasRawField(row Row, field string) bool {
-	_, ok := row.Raw[field]
-	return ok
-}
 
 func splitRawToken(value string) (string, string) {
 	if !strings.HasPrefix(value, "raw[") {
@@ -363,18 +408,30 @@ func compareValues(left, op, right string) (bool, error) {
 		return strings.Contains(left, right), nil
 	case "!~":
 		return !strings.Contains(left, right), nil
+	case "^=":
+		return strings.HasPrefix(left, right), nil
+	case "$=":
+		return strings.HasSuffix(left, right), nil
+	case "=~":
+		re, err := regexp.Compile(right)
+		if err != nil {
+			return false, fmt.Errorf("invalid regex %q: %w", right, err)
+		}
+		loc := re.FindStringIndex(left)
+		return loc != nil && loc[0] == 0 && loc[1] == len(left), nil
 	case ">", ">=", "<", "<=":
-		if l, lOK := parseComparableNumber(left); lOK {
-			if r, rOK := parseComparableNumber(right); rOK {
+		if l, lErr := ParseAmountDecimal(left, ""); lErr == nil {
+			if r, rErr := ParseAmountDecimal(right, ""); rErr == nil {
+				cmp := l.Cmp(r)
 				switch op {
 				case ">":
-					return l > r, nil
+					return cmp > 0, nil
 				case ">=":
-					return l >= r, nil
+					return cmp >= 0, nil
 				case "<":
-					return l < r, nil
+					return cmp < 0, nil
 				case "<=":
-					return l <= r, nil
+					return cmp <= 0, nil
 				}
 			}
 		}
@@ -390,15 +447,6 @@ func compareValues(left, op, right string) (bool, error) {
 		}
 	}
 	return false, fmt.Errorf("unsupported operator %q", op)
-}
-
-func parseComparableNumber(value string) (float64, bool) {
-	cleaned := strings.NewReplacer(",", "", "¥", "", "￥", "", "$", "", "CNY", "", "RMB", "").Replace(strings.TrimSpace(value))
-	if !regexp.MustCompile(`^[+-]?\d+(\.\d+)?$`).MatchString(cleaned) {
-		return 0, false
-	}
-	n, err := strconv.ParseFloat(cleaned, 64)
-	return n, err == nil
 }
 
 func (p *exprParser) peek() exprToken {

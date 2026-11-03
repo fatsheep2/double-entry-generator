@@ -123,6 +123,8 @@ func loadProjectImportConfig() projectImportConfig {
 }
 
 type importRuleConfig struct {
+	ProtocolVersion       string          `yaml:"protocolVersion"`
+	RequiredCapabilities  []string        `yaml:"requiredCapabilities"`
 	TemplateRules         []importer.Rule `yaml:"templateRules"`
 	TemplateRuleOverrides []importer.Rule `yaml:"templateRuleOverrides"`
 	PersonalRules         []importer.Rule `yaml:"personalRules"`
@@ -159,6 +161,12 @@ func parseRuleBytes(b []byte) (importRuleConfig, error) {
 	if err := yaml.Unmarshal(b, &wrapper); err != nil {
 		return importRuleConfig{}, err
 	}
+	// Validate each source before merging: a later supported file must not
+	// overwrite an unknown protocol or discard starter-rule requirements.
+	contract := importer.Profile{ProtocolVersion: wrapper.ProtocolVersion, RequiredCapabilities: wrapper.RequiredCapabilities}
+	if err := contract.ValidateCapabilities(); err != nil {
+		return importRuleConfig{}, err
+	}
 	return wrapper, nil
 }
 
@@ -166,6 +174,12 @@ func appendRulesToProfile(profile *importer.Profile, ruleCfg importRuleConfig) {
 	profile.TemplateRules = append(profile.TemplateRules, ruleCfg.TemplateRules...)
 	profile.TemplateRuleOverrides = append(profile.TemplateRuleOverrides, ruleCfg.TemplateRuleOverrides...)
 	profile.PersonalRules = append(profile.PersonalRules, ruleCfg.PersonalRules...)
+	if ruleCfg.ProtocolVersion != "" {
+		profile.ProtocolVersion = ruleCfg.ProtocolVersion
+	}
+	if len(ruleCfg.RequiredCapabilities) > 0 {
+		profile.RequiredCapabilities = append(profile.RequiredCapabilities, ruleCfg.RequiredCapabilities...)
+	}
 	if ruleCfg.Options.Title != "" {
 		profile.Name = ruleCfg.Options.Title
 	}

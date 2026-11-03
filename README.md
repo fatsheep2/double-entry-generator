@@ -167,7 +167,7 @@ double-entry-generator translate \
 ```
 
 架构支持扩展：
-- 添加新的账单格式：实现新的 [provider](pkg/provider)
+- 添加新的账单格式：优先向 [`deg-provider-template`](https://github.com/deb-sig/deg-provider-template) 提交通用模板；仅当模板表达能力不足时才实现新的 [Go provider](pkg/provider)
 - 添加新的记账语言：实现新的 [compiler](pkg/compiler)
 
 ## 📚 文档
@@ -201,6 +201,8 @@ double-entry-generator translate \
 ## 🤝 贡献
 
 欢迎贡献代码和文档！请查看 [贡献指南](https://deb-sig.github.io/double-entry-generator/contributing/)。
+
+新增账单格式遵循“模板优先”：先按 [`deg-provider-template`](https://github.com/deb-sig/deg-provider-template) 的可执行示例和校验流程实现，只有跨行状态、多文件合并、未支持的容器格式或模板规则无法表达的输出语义才进入 Go provider 评审。
 
 ### 如何贡献
 
